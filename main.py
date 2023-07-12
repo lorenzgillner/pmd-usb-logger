@@ -1,29 +1,39 @@
-# Example code for real time plot of Elmor Labs PMD measurement readings through USB serial interface
-# Real time plotting inspired by https://towardsdatascience.com/plotting-live-data-with-matplotlib-d871fac7500b
-# Written by bjorntas
+# Example code for fast reception of ElmorLabs PMD-USB measurement readings through serial interface
+# Based on https://github.com/bjorntas/elmorlabs-pmd-usb-serial-interface/tree/main
 
 import serial
 import serial.tools.list_ports
-from datetime import datetime
+import time
 import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-import matplotlib.dates as mdates
 
 # settings
 
 pmd_settings = {
-    'port':'COM9',
+    'port':'COM5',
     'baudrate':115200,
     'bytesize':8,
     'stopbits':1,
     'timeout':1
 }
 
+supported_baudrates = { 115200, 460800 }
+
 list_all_windows_ports = True
 save_to_csv = True
 max_length = 1000
 
+def prime_connection():
+
+    with serial.Serial(**pmd_settings) as ser:
+
+        # stop cont rx if already running
+        ser.write(b'\x07') # cmd write config cont tx
+        ser.write(b'\x00') # 0 = disable, 1 = enable
+        ser.write(b'\x00') # timestamp bytes 0-4
+        ser.write(b'\x00') # bitwise channel mask
+        ser.flush()
+        time.sleep(1)
+        ser.read_all()
 
 def check_connection():
     with serial.Serial(**pmd_settings) as ser:
@@ -34,6 +44,8 @@ def check_connection():
         # b'\x03'   read values
         # b'\x04'   read config
         # b'\x06'   read ADC buffer
+        # b'\x07'   write config cont tx
+        # b'\x08'   write config uart
 
         # check welcome message
         ser.write(b'\x00')
@@ -47,103 +59,122 @@ def check_connection():
         read_bytes = ser.read(100)
         print('Struct: ', read_bytes)
 
+def set_baud_rate(baud_rate):
 
-def get_new_sensor_values(save_to_csv):
+    assert(baud_rate in supported_baudrates)
+
+    '''baud_bytes = int.to_bytes(baud_rate, 4, 'little')
+    parity_bytes = int.to_bytes(2, 4, 'little') # no parity
+    datawidth_bytes = int.to_bytes(0, 4, 'little') # 8 bits
+    stopbits_bytes = int.to_bytes(0, 4, 'little') # 1 bit'''
+
+    # configure device for new baud rate
+    with serial.Serial(**pmd_settings) as ser:
+
+        ser.write(b'\x08') # cmd write config uart
+        
+        '''ser.write(baud_bytes[0])
+        ser.write(baud_bytes[1])
+        ser.write(baud_bytes[2])
+        ser.write(baud_bytes[3])
+        ser.write(parity_bytes[0])
+        ser.write(parity_bytes[1])
+        ser.write(parity_bytes[2])
+        ser.write(parity_bytes[3])
+        ser.write(datawidth_bytes[0])
+        ser.write(datawidth_bytes[1])
+        ser.write(datawidth_bytes[2])
+        ser.write(datawidth_bytes[3])
+        ser.write(stopbits_bytes[0])
+        ser.write(stopbits_bytes[1])
+        ser.write(stopbits_bytes[2])
+        ser.write(stopbits_bytes[3])'''
+
+        if(baud_rate == 115200):
+            ser.write(b'\x00\xC2\x01\x00') # baud rate
+        elif(baud_rate == 460800):
+            ser.write(b'\x00\x07\x80\x00')
+
+        ser.write(b'\x02\x00\x00\x00') # parity (2 = none)
+        ser.write(b'\x00\x00\x00\x00') # data width (0 = 8 bits)
+        ser.write(b'\x00\x00\x00\x00') # stop bits (0 = 1 bit)
+
+        ser.flush()
+
+    time.sleep(1)
+    pmd_settings['baudrate'] = baud_rate
+
+def int16_from_adc(value):
+    # check sign (12-bit)
+    if(value & 0x800):
+        # negative
+        value = value - 0x1000
+
+    return value
+
+def continuous_data_rx(save_to_csv):
 
     with serial.Serial(**pmd_settings) as ser:
-        command = b'\x03'
-        ser.write(command)
+
+        # setup continuous data rx
+        ser.write(b'\x07') # cmd write config cont tx
+        ser.write(b'\x01') # 0 = disable, 1 = enable
+        ser.write(b'\x00') # timestamp bytes 0-4
+        ser.write(b'\xFF') # bitwise channel mask
         ser.flush()
-        read_bytes = ser.read(16)
+        
+        while True:
+            
+            # read data
+            rx_buffer = ser.read(4*2*2) # 4 channels * 2 values V/I * 2 bytes per value
+            timestamp = time.time_ns()
 
-    df = pd.DataFrame()
-    timestamp = pd.Timestamp(datetime.today())
+            # convert data
+            pcie1_v = int16_from_adc((rx_buffer[1] << 8 | rx_buffer[0]) >> 4) * 0.007568
+            pcie1_i = int16_from_adc((rx_buffer[3] << 8 | rx_buffer[2]) >> 4) * 0.0488
+            pcie1_p = pcie1_v * pcie1_i
+            pcie2_v = int16_from_adc((rx_buffer[5] << 8 | rx_buffer[4]) >> 4) * 0.007568
+            pcie2_i = int16_from_adc((rx_buffer[7] << 8 | rx_buffer[6]) >> 4) * 0.0488
+            pcie2_p = pcie2_v * pcie2_i
+            eps1_v = int16_from_adc((rx_buffer[9] << 8 | rx_buffer[8]) >> 4) * 0.007568
+            eps1_i = int16_from_adc((rx_buffer[11] << 8 | rx_buffer[10]) >> 4) * 0.0488
+            eps1_p = eps1_v * eps1_i
+            eps2_v = int16_from_adc((rx_buffer[13] << 8 | rx_buffer[12]) >> 4) * 0.007568
+            eps2_i = int16_from_adc((rx_buffer[15] << 8 | rx_buffer[14]) >> 4) * 0.0488
+            eps2_p = eps2_v * eps2_i
 
-    sensors = ['PCIE1', 'PCIE2', 'EPS1', 'EPS2']
+            gpu_power = pcie1_p + pcie2_p
+            cpu_power = eps1_p + eps2_p
+            total_power = gpu_power + cpu_power
 
-    for i, name in enumerate(sensors):
+            # save data
+            print('Time: ', timestamp, 'PCIE1_V: ', pcie1_v, 'V')
 
-        # convert bytes to float values
-        voltage_value = int.from_bytes(read_bytes[i*4:i*4+2], byteorder='little')*0.01
-        current_value = int.from_bytes(read_bytes[i*4+2:i*4+4], byteorder='little')*0.1
-        power_value = voltage_value * current_value
+def continuous_data_rx_single(save_to_csv):
 
-        # save rows to dataframe
-        voltage_row = pd.DataFrame([[timestamp, name, 'U', voltage_value]], columns = ['timestamp', 'id', 'unit', 'value'])
-        current_row = pd.DataFrame([[timestamp, name, 'I', current_value]], columns = ['timestamp', 'id', 'unit', 'value'])
-        power_row = pd.DataFrame([[timestamp, name, 'P', power_value]], columns = ['timestamp', 'id', 'unit', 'value'])
-        df = pd.concat([df, voltage_row], ignore_index=True)
-        df = pd.concat([df, current_row], ignore_index=True)
-        df = pd.concat([df, power_row], ignore_index=True)
+    with serial.Serial(**pmd_settings) as ser:
 
-    if save_to_csv:
-        df.to_csv('measurements.csv', mode='a', header=False, index=False)
+        # setup continuous data rx
+        ser.write(b'\x07') # cmd write config cont tx
+        ser.write(b'\x01') # 0 = disable, 1 = enable
+        ser.write(b'\x02') # timestamp bytes 0-4
+        ser.write(b'\x03') # bitwise channel mask (only PCIE1 Voltage and Current)
+        ser.flush()
 
-    return df
+        while True:
 
+            # read data
+            rx_buffer = ser.read(2 + 1*2*2) # 2 timestamp bytes + 1 channels * 2 values V/I * 2 bytes per value
+            device_timestamp = (rx_buffer[1] << 8 | rx_buffer[0])*1.0/3e6 # 3 MHz timer on device
+            system_timestamp = time.time_ns()*1.0/1e9 # ns to s
 
-def animation_update(i, *fargs):
+            # convert data
+            pcie1_v = int16_from_adc((rx_buffer[3] << 8 | rx_buffer[2]) >> 4) * 0.007568
+            pcie1_i = int16_from_adc((rx_buffer[5] << 8 | rx_buffer[4]) >> 4) * 0.0488
+            pcie1_p = pcie1_v * pcie1_i
 
-    # unpack dataframe from input tuple
-    df = fargs[0]
-
-    # update data
-    df_new_data = get_new_sensor_values(save_to_csv)
-
-    # append new data to old data
-    for _, row in df_new_data.iterrows():
-        df.loc[df.index.max()+1] = row # pd.concat() does not work
-
-    if df.shape[0] > max_length:
-        for _ in range(len(df_new_data)):
-            df.drop(df.index.min(), inplace=True)
-
-    # pivot dataframe
-    df_voltage_plot = df[df.unit == 'U'].pivot(columns=['id', 'unit'], index='timestamp')
-    df_current_plot = df[df.unit == 'I'].pivot(columns=['id', 'unit'], index='timestamp')
-    df_power_plot = df[df.unit == 'P'].pivot(columns=['id', 'unit'], index='timestamp')
-
-    df_voltage_plot.columns = [col[1] for col in df_voltage_plot.columns]
-    df_current_plot.columns = [col[1] for col in df_current_plot.columns]
-    df_power_plot.columns = [col[1] for col in df_power_plot.columns]
-                    
-    # clear axis
-    voltage_ax.cla()
-    current_ax.cla()
-    power_ax.cla()
-
-    # plot voltage line
-    df_voltage_plot.plot(ax=voltage_ax)
-    df_current_plot.plot(ax=current_ax)
-    df_power_plot.plot(ax=power_ax)
-
-    # set titles
-    voltage_ax.set_title('Voltage', fontsize=9, color='k')
-    current_ax.set_title('Current', fontsize=9, color='k')
-    power_ax.set_title('Power', fontsize=9, color='k')
-
-    # set ylabels
-    voltage_ax.set_ylabel('Voltage [V]', fontsize=9, color='k')
-    current_ax.set_ylabel('Current [A]', fontsize=9, color='k')
-    power_ax.set_ylabel('Power [W]', fontsize=9, color='k')
-    
-    # remove spines and ticks
-    voltage_ax.spines['left'].set_visible(False)
-    voltage_ax.spines['right'].set_visible(False)
-    voltage_ax.spines['top'].set_visible(False)
-    voltage_ax.spines['bottom'].set_visible(False)
-
-    current_ax.spines['left'].set_visible(False)
-    current_ax.spines['right'].set_visible(False)
-    current_ax.spines['top'].set_visible(False)
-    current_ax.spines['bottom'].set_visible(False)
-
-    power_ax.spines['left'].set_visible(False)
-    power_ax.spines['right'].set_visible(False)
-    power_ax.spines['top'].set_visible(False)
-    power_ax.spines['bottom'].set_visible(False)
-
-
+            # save data
+            print('PCIE1 Time: ', system_timestamp, ' ', device_timestamp, ' ', pcie1_v, 'V', ' ', pcie1_i, 'A', ' ', pcie1_p, 'W')
 
 if __name__ == '__main__':
 
@@ -154,33 +185,12 @@ if __name__ == '__main__':
             print(p)
         print()
 
+    prime_connection()
+
     check_connection()
+
+    #set_baud_rate(460800)
+
+    #check_connection()
     
-    df = get_new_sensor_values(save_to_csv=False)
-
-    if save_to_csv:
-        df.to_csv('measurements.csv', index=False)
-
-    plt.style.use('ggplot')
-
-    # define and adjust figure
-    fig, (voltage_ax, current_ax, power_ax) = plt.subplots(3, 1, figsize=(8, 7), facecolor='#707576')
-
-    fig.suptitle('Elmor Labs PMD', fontsize=14)
-
-    voltage_ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
-    current_ax.xaxis.set_minor_formatter(mdates.DateFormatter("%H:%M:%S"))
-    power_ax.xaxis.set_minor_formatter(mdates.DateFormatter("%H:%M:%S"))
-
-    voltage_ax.tick_params(labelbottom=False)
-    current_ax.tick_params(labelbottom=False)
-    
-    voltage_ax.xaxis.label.set_visible(False)
-    current_ax.xaxis.label.set_visible(False)
-    power_ax.xaxis.label.set_visible(False)
-
-    # animate
-    ani = FuncAnimation(fig, animation_update, fargs=(df,), interval=0)
-    fig.tight_layout()
-    fig.subplots_adjust(left=0.09)
-    plt.show()
+    continuous_data_rx_single(save_to_csv=False)
