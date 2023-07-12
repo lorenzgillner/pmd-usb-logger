@@ -1,14 +1,8 @@
-# elmorlabs-pmd-usb-serial-inteface
-Live plotting example with data from ElmorLabs PMD-USB serial interface.
+# pmd-usb-serial-interface-fast
 
 Link to product: https://elmorlabs.com/product/elmorlabs-pmd-usb-power-measurement-device-with-usb/
 
-The project was created in and for Windows
+Based on:
 
-Python packages used:
-- pyserial
-- pandas
-- matplotlib
-
-<img width="589" alt="PMD_plot_example" src="https://user-images.githubusercontent.com/41986414/183417530-1e9046e3-0fa4-4901-b203-e04a341ba18c.PNG">
-Example of live plotting voltage, current and power data from the ElmorLabs PMD through USB serial interface
+* https://github.com/ElmorLabs/PMDLogger/tree/master
+* https://github.com/bjorntas/elmorlabs-pmd-usb-serial-interface/tree/main
