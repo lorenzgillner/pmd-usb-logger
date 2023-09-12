@@ -95,7 +95,7 @@ pmd_settings = {
     'timeout':1
 }
 
-supported_baudrates = { 115200, 230400, 460800, 921600, 1500000, 2000000 }
+supported_baudrates = [ 115200, 230400, 460800, 921600, 1500000, 2000000 ]
 
 list_all_windows_ports = True
 save_to_csv = True
@@ -114,7 +114,11 @@ def prime_connection():
         ser.write(b'\x00') # timestamp bytes 0-4
         ser.write(b'\x00') # bitwise channel mask
         ser.flush()
+
+        # wait for command to execute
         time.sleep(1)
+
+        # clear buffer
         ser.read_all()
 
 def check_connection():
@@ -129,17 +133,25 @@ def check_connection():
         # b'\x07'   write config cont tx
         # b'\x08'   write config uart
 
+        # clear buffer
+        ser.read_all()
+
         # check welcome message
         ser.write(b'\x00')
         ser.flush()
         read_bytes = ser.read(18)
-        assert read_bytes == b'ElmorLabs PMD-USB'
+        if read_bytes != b'ElmorLabs PMD-USB':
+            return False
 
         # check sensor struct
         ser.write(b'\x02')
         ser.flush()
-        read_bytes = ser.read(100)
-        print('Struct: ', read_bytes)
+        read_bytes = ser.read(48)
+        
+        if(len(read_bytes) != 48):
+            return False
+
+        return True
 
 def read_calibration():
 
@@ -179,8 +191,6 @@ def read_calibration():
 
 def set_baud_rate(baud_rate):
 
-    print (f'Attemping to set baud rate to {baud_rate}')
-
     assert(baud_rate in supported_baudrates)
 
     # configure device for new baud rate
@@ -189,8 +199,8 @@ def set_baud_rate(baud_rate):
         ser.write(b'\x08') # cmd write config uart
     
         if(baud_rate == 115200):
-            ser.write(b'\x00\xC2\x01\x00') # baud rate
-        if(baud_rate == 230400):
+            ser.write(b'\x00\xC2\x01\x00') # 32-bit baud rate
+        elif(baud_rate == 230400):
             ser.write(b'\x00\x84\x03\x00')
         elif(baud_rate == 460800):
             ser.write(b'\x00\x08\x07\x00')
@@ -201,13 +211,14 @@ def set_baud_rate(baud_rate):
         elif(baud_rate == 2000000):
             ser.write(b'\x80\x84\x1E\x00')
 
-        ser.write(b'\x02\x00\x00\x00') # parity (2 = none)
-        ser.write(b'\x00\x00\x00\x00') # data width (0 = 8 bits)
-        ser.write(b'\x00\x00\x00\x00') # stop bits (0 = 1 bit)
+        ser.write(b'\x02\x00\x00\x00') # 32-bit parity (2 = none)
+        ser.write(b'\x00\x00\x00\x00') # 32-bit data width (0 = 8 bits)
+        ser.write(b'\x00\x00\x00\x00') # 32-bit stop bits (0 = 1 bit)
 
         ser.flush()
 
     time.sleep(1)
+
     pmd_settings['baudrate'] = baud_rate
 
 def continuous_data_rx(save_to_csv):
@@ -333,13 +344,27 @@ if __name__ == '__main__':
             print(p)
         print()
 
-    prime_connection()
+    # find correct baud rate
+    device_response = False
+    for baud_rate in supported_baudrates:
+        
+        pmd_settings['baudrate'] = baud_rate
 
-    check_connection()
+        prime_connection()
 
-    #set_baud_rate(115200) # only necessary to increase the sample rate
+        if check_connection() == True:
+            print(f'Successfully communicated with device at {baud_rate} baud')
+            device_response = True
+            break
+        else:
+            print(f'Unable to communicate with device at {baud_rate} baud')
+
+    if device_response == False:
+        print('Unable to communicate with the device at any baud rate.')
+        exit()
 
     read_calibration()
-    
-    continuous_data_rx(save_to_csv=False)
 
+    set_baud_rate(2000000) # only necessary to increase the sample rate
+
+    continuous_data_rx(save_to_csv=False)
