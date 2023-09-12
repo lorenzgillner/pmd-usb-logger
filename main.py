@@ -5,22 +5,104 @@ import serial
 import serial.tools.list_ports
 import time
 import pandas as pd
+from ctypes import *
+
+# data classes
+class CalStruct(Structure):
+    _fields_ = [
+        ('AdcOffset', c_int8)
+    ]
+
+    def __str__(self):
+        return f'Vendor {str(self.Vendor)} Product {str(self.Product)} Firmware {str(self.Firmware)}'
+
+
+class DeviceIdStruct(Structure):
+    _pack_ = 1
+    _fields_ = [
+        ('Vendor', c_uint8),
+        ('Product', c_uint8),
+        ('Firmware', c_uint8)
+    ]
+
+    def __str__(self):
+        return f'Vendor {str(self.Vendor)} Product {str(self.Product)} Firmware {str(self.Firmware)}'
+
+
+class PMD_USB_ConfigStruct(Structure):
+    _pack_ = 2
+    _fields_ = [
+        ('Version', c_uint8),
+        ('Crc', c_uint16),
+        ('AdcOffset', c_int8*8),
+        ('OledDisable', c_uint8),
+        ('TimeoutCount', c_uint16),
+        ('TimeoutAction', c_uint8),
+        ('OledSpeed', c_uint8),
+        ('RestartAdcFlag', c_uint8),
+        ('CalFlag', c_uint8),
+        ('UpdateConfigFlag', c_uint8),
+        ('OledRotation', c_uint8),
+        ('Averaging', c_uint8),
+        ('rsvd', c_uint8*3)
+    ]
+
+    def __str__(self):
+        return f'PMD-USB Config Struct Ver {str(self.Version)} Crc {str(self.Crc)}'
+
+class PMD_USB_ConfigStruct_V5(Structure):
+    _pack_ = 2
+    _fields_ = [
+        ('Version', c_uint8),
+        ('Crc', c_uint16),
+        ('AdcOffset', c_int8*8),
+        ('OledDisable', c_uint8),
+        ('TimeoutCount', c_uint16),
+        ('TimeoutAction', c_uint8),
+        ('OledSpeed', c_uint8),
+        ('RestartAdcFlag', c_uint8),
+        ('CalFlag', c_uint8),
+        ('UpdateConfigFlag', c_uint8),
+        ('OledRotation', c_uint8),
+        ('Averaging', c_uint8),
+        ('AdcGainOffset', c_int8*8),
+        ('rsvd', c_uint8*3)
+    ]
+
+    def __str__(self):
+        return f'PMD-USB Config Struct Ver {str(self.Version)} Crc {str(self.Crc)}'
+
+# helper functions
+def int8_from_adc(value):
+    # check sign (8-bit)
+    if(value & 0x80): # negative
+        value = value - 0x100
+    return value
+
+def int16_from_adc(value):
+    # check sign (12-bit)
+    if(value & 0x800): # negative
+        value = value - 0x1000
+    return value
 
 # settings
 
 pmd_settings = {
-    'port':'COM12',
-    'baudrate':115200,
+    'port':'COM13', # change to your port
+    'baudrate':115200, # default 115200
     'bytesize':8,
     'stopbits':1,
     'timeout':1
 }
 
-supported_baudrates = { 115200, 115200, 230400, 460800, 921600, 1500000, 2000000 }
+supported_baudrates = { 115200, 230400, 460800, 921600, 1500000, 2000000 }
 
 list_all_windows_ports = True
 save_to_csv = True
 max_length = 1000
+
+# storage of calibration data
+cal_data = [0]*8
 
 def prime_connection():
 
@@ -59,43 +141,57 @@ def check_connection():
         read_bytes = ser.read(100)
         print('Struct: ', read_bytes)
 
+def read_calibration():
+
+    global cal_data
+
+    with serial.Serial(**pmd_settings) as ser:
+
+        ser.write(b'\x01')
+        ser.flush()
+        buffer = ser.read(sizeof(DeviceIdStruct))
+
+        # read firmware version
+        id_struct = DeviceIdStruct.from_buffer_copy(buffer)
+
+        # read config struct
+        ser.write(b'\x04')
+        ser.flush()
+
+        if(id_struct.Firmware < 6):
+            
+            buffer = ser.read(sizeof(PMD_USB_ConfigStruct))
+            config_struct = PMD_USB_ConfigStruct.from_buffer_copy(buffer)
+
+            for i in range(0, 8):
+                cal_data[i] = config_struct.AdcOffset[i]
+
+        else:
+
+            buffer = ser.read(sizeof(PMD_USB_ConfigStruct_V5))
+            config_struct = PMD_USB_ConfigStruct_V5.from_buffer_copy(buffer)
+
+            for i in range(0, 8):
+                cal_data[i] = config_struct.AdcOffset[i]
+
+        print('Calibration data: ', cal_data)
+
+
 def set_baud_rate(baud_rate):
 
-    assert(baud_rate in supported_baudrates)
+    print (f'Attemping to set baud rate to {baud_rate}')
 
-    '''baud_bytes = int.to_bytes(baud_rate, 4, 'little')
-    parity_bytes = int.to_bytes(2, 4, 'little') # no parity
-    datawidth_bytes = int.to_bytes(0, 4, 'little') # 8 bits
-    stopbits_bytes = int.to_bytes(0, 4, 'little') # 1 bit'''
+    assert(baud_rate in supported_baudrates)
 
     # configure device for new baud rate
     with serial.Serial(**pmd_settings) as ser:
 
         ser.write(b'\x08') # cmd write config uart
-        
-        '''ser.write(baud_bytes[0])
-        ser.write(baud_bytes[1])
-        ser.write(baud_bytes[2])
-        ser.write(baud_bytes[3])
-        ser.write(parity_bytes[0])
-        ser.write(parity_bytes[1])
-        ser.write(parity_bytes[2])
-        ser.write(parity_bytes[3])
-        ser.write(datawidth_bytes[0])
-        ser.write(datawidth_bytes[1])
-        ser.write(datawidth_bytes[2])
-        ser.write(datawidth_bytes[3])
-        ser.write(stopbits_bytes[0])
-        ser.write(stopbits_bytes[1])
-        ser.write(stopbits_bytes[2])
-        ser.write(stopbits_bytes[3])'''
-
+    
         if(baud_rate == 115200):
             ser.write(b'\x00\xC2\x01\x00') # baud rate
         if(baud_rate == 230400):
             ser.write(b'\x00\x84\x03\x00')
-        elif(baud_rate == 460800):
-            ser.write(b'\x00\x08\x07\x00')
         elif(baud_rate == 460800):
             ser.write(b'\x00\x08\x07\x00')
         elif(baud_rate == 921600):
@@ -114,119 +210,119 @@ def set_baud_rate(baud_rate):
     time.sleep(1)
     pmd_settings['baudrate'] = baud_rate
 
-def int16_from_adc(value):
-    # check sign (12-bit)
-    if(value & 0x800):
-        # negative
-        value = value - 0x1000
-
-    return value
-
 def continuous_data_rx(save_to_csv):
 
+    global cal_data
+
     with serial.Serial(**pmd_settings) as ser:
-
-        # setup continuous data rx
-        ser.write(b'\x07') # cmd write config cont tx
-        ser.write(b'\x01') # 0 = disable, 1 = enable
-        ser.write(b'\x00') # timestamp bytes 0-4
-        ser.write(b'\xFF') # bitwise channel mask
-        ser.flush()
-
-        input_buffer = bytearray()
-
         
-        while True:
-            
-            # read all data
-            input_buffer.extend(ser.read_all())
+        # define transferred data
+        TIMESTAMP_BYTES = 0 # 1 = 8-bit, 2 = 16-bit, 4 = 32-bit
+        ENABLE_PCIE1_VOLTAGE = 0 # 0 = disable, 1 = enable
+        ENABLE_PCIE1_CURRENT = 0
+        ENABLE_PCIE2_VOLTAGE = 0
+        ENABLE_PCIE2_CURRENT = 0
+        ENABLE_EPS1_VOLTAGE = 1
+        ENABLE_EPS1_CURRENT = 1
+        ENABLE_EPS2_VOLTAGE = 0
+        ENABLE_EPS2_CURRENT = 0
 
-            #print('Buffer length: ', len(input_buffer))
+        # build bitwise channel mask
+        channel_mask = ENABLE_EPS2_CURRENT << 7 | ENABLE_EPS2_VOLTAGE << 6 | ENABLE_EPS1_CURRENT << 5 | ENABLE_EPS1_VOLTAGE << 4 | ENABLE_PCIE2_CURRENT << 3 | ENABLE_PCIE2_VOLTAGE << 2 | ENABLE_PCIE1_CURRENT << 1 | ENABLE_PCIE1_VOLTAGE << 0
 
-            # read data chunks
-            chunk_num_bytes = 4*2*2 # 4 channels * 2 values V/I * 2 bytes per value
-
-            while(len(input_buffer) >= chunk_num_bytes):
-
-                # read data chunk
-                #rx_buffer = ser.read(4*2*2) # 4 channels * 2 values V/I * 2 bytes per value
-                rx_buffer = input_buffer[0:chunk_num_bytes]
-                input_buffer = input_buffer[chunk_num_bytes:]
-
-                timestamp = time.time_ns()
-
-                # convert data
-                pcie1_v = int16_from_adc((rx_buffer[1] << 8 | rx_buffer[0]) >> 4) * 0.007568
-                pcie1_i = int16_from_adc((rx_buffer[3] << 8 | rx_buffer[2]) >> 4) * 0.0488
-                pcie1_p = pcie1_v * pcie1_i
-                pcie2_v = int16_from_adc((rx_buffer[5] << 8 | rx_buffer[4]) >> 4) * 0.007568
-                pcie2_i = int16_from_adc((rx_buffer[7] << 8 | rx_buffer[6]) >> 4) * 0.0488
-                pcie2_p = pcie2_v * pcie2_i
-                eps1_v = int16_from_adc((rx_buffer[9] << 8 | rx_buffer[8]) >> 4) * 0.007568
-                eps1_i = int16_from_adc((rx_buffer[11] << 8 | rx_buffer[10]) >> 4) * 0.0488
-                eps1_p = eps1_v * eps1_i
-                eps2_v = int16_from_adc((rx_buffer[13] << 8 | rx_buffer[12]) >> 4) * 0.007568
-                eps2_i = int16_from_adc((rx_buffer[15] << 8 | rx_buffer[14]) >> 4) * 0.0488
-                eps2_p = eps2_v * eps2_i
-
-                gpu_power = pcie1_p + pcie2_p
-                cpu_power = eps1_p + eps2_p
-                total_power = gpu_power + cpu_power
-
-                # save data
-                print('Time: ', round(timestamp, 6), 'PCIE1_V: ', round(pcie1_v, 3), 'V')
-
-def continuous_data_rx_single(save_to_csv):
-
-    with serial.Serial(**pmd_settings) as ser:
-
-        #ser.set_buffer_size(rx_size = 128000, tx_size = 128000)
+        # empty buffer
+        ser.read_all()
 
         # setup continuous data rx
         ser.write(b'\x07') # cmd write config cont tx
         ser.write(b'\x01') # 0 = disable, 1 = enable
-        ser.write(b'\x02') # timestamp bytes 0-4
-        ser.write(b'\x03') # bitwise channel mask (only PCIE1 Voltage and Current)
+        ser.write(int.to_bytes(TIMESTAMP_BYTES, 1, 'little')) # timestamp bytes 0-4
+        ser.write(int.to_bytes(channel_mask, 1, 'little')) # bitwise channel mask
         ser.flush()
 
+        # incoming buffer
         input_buffer = bytearray()
+        value_buffer = []
+        chunk_num_bytes = TIMESTAMP_BYTES + 2*(ENABLE_PCIE1_VOLTAGE + ENABLE_PCIE1_CURRENT + ENABLE_PCIE2_VOLTAGE + ENABLE_PCIE2_CURRENT + ENABLE_EPS1_VOLTAGE + ENABLE_EPS1_CURRENT + ENABLE_EPS2_VOLTAGE + ENABLE_EPS2_CURRENT)
 
+        # speed measurement
         count = 0
         time_start = time.time_ns()*1.0/1e9
-
+        
         while True:
 
             # read all data
             input_buffer.extend(ser.read_all())
 
-            #print('Buffer length: ', len(input_buffer))
-
             # read data chunks
-            chunk_num_bytes = 2 + 1*2*2 # 2 timestamp bytes + 1 channels * 2 values V/I * 2 bytes per value
             while(len(input_buffer) >= chunk_num_bytes):
-                #rx_buffer = ser.read(2 + 1*2*2) # 2 timestamp bytes + 1 channels * 2 values V/I * 2 bytes per value
+
                 rx_buffer = input_buffer[0:chunk_num_bytes]
                 input_buffer = input_buffer[chunk_num_bytes:]
 
-                device_timestamp = (rx_buffer[1] << 8 | rx_buffer[0])*1.0/3e6 # 3 MHz timer on device
                 system_timestamp = time.time_ns()*1.0/1e9 # ns to s
 
-                # convert data
-                pcie1_v = int16_from_adc((rx_buffer[3] << 8 | rx_buffer[2]) >> 4) * 0.007568
-                pcie1_i = int16_from_adc((rx_buffer[5] << 8 | rx_buffer[4]) >> 4) * 0.0488
-                pcie1_p = pcie1_v * pcie1_i
-                    
-                # print data
-                print('PCIE1 Time: ', round(system_timestamp, 6), ' ', round(device_timestamp, 6), ' ', round(pcie1_v, 3), 'V', ' ', round(pcie1_i, 6), 'A', ' ', round(pcie1_p, 6), 'W')
+                if(TIMESTAMP_BYTES == 1):
+                    device_timestamp = (rx_buffer[0])*1.0/3e6 # 3 MHz timer on device
+                elif(TIMESTAMP_BYTES == 2):
+                    device_timestamp = (rx_buffer[1] << 8 | rx_buffer[0])*1.0/3e6
+                elif(TIMESTAMP_BYTES == 4):
+                    device_timestamp = (rx_buffer[3] << 24 | rx_buffer[2] << 16 | rx_buffer[1] << 8 | rx_buffer[0])*1.0/3e6
+                else:
+                    device_timestamp = 0
 
-                #assert(pcie1_v < 12.5 and pcie1_v > 11.5)
+                rx_buffer_pos = TIMESTAMP_BYTES
+
+                # default values
+                pcie1_v = 0
+                pcie1_i = 0
+                pcie2_v = 0
+                pcie2_i = 0
+                eps1_v = 0
+                eps1_i = 0
+                eps2_v = 0
+                eps2_i = 0
+
+                # convert data
+                if(ENABLE_PCIE1_VOLTAGE == 1):
+                    pcie1_v = (int16_from_adc((rx_buffer[rx_buffer_pos + 1] << 8 | rx_buffer[rx_buffer_pos + 0]) >> 4) + int8_from_adc(cal_data[0])) * 0.007568
+                    rx_buffer_pos += 2
+                if(ENABLE_PCIE1_CURRENT == 1):
+                    pcie1_i = (int16_from_adc((rx_buffer[rx_buffer_pos + 1] << 8 | rx_buffer[rx_buffer_pos + 0]) >> 4) + int8_from_adc(cal_data[1])) * 0.0488
+                    rx_buffer_pos += 2
+                if(ENABLE_PCIE2_VOLTAGE == 1):
+                    pcie2_v = (int16_from_adc((rx_buffer[rx_buffer_pos + 1] << 8 | rx_buffer[rx_buffer_pos + 0]) >> 4) + int8_from_adc(cal_data[2])) * 0.007568
+                    rx_buffer_pos += 2
+                if(ENABLE_PCIE2_CURRENT == 1):
+                    pcie2_i = (int16_from_adc((rx_buffer[rx_buffer_pos + 1] << 8 | rx_buffer[rx_buffer_pos + 0]) >> 4) + int8_from_adc(cal_data[3])) * 0.0488
+                    rx_buffer_pos += 2
+                if(ENABLE_EPS1_VOLTAGE == 1):
+                    eps1_v = (int16_from_adc((rx_buffer[rx_buffer_pos + 1] << 8 | rx_buffer[rx_buffer_pos + 0]) >> 4) + int8_from_adc(cal_data[4])) * 0.007568
+                    rx_buffer_pos += 2
+                if(ENABLE_EPS1_CURRENT == 1):
+                    eps1_i = (int16_from_adc((rx_buffer[rx_buffer_pos + 1] << 8 | rx_buffer[rx_buffer_pos + 0]) >> 4) + int8_from_adc(cal_data[5]))* 0.0488
+                    rx_buffer_pos += 2
+                if(ENABLE_EPS2_VOLTAGE == 1):
+                    eps2_v = (int16_from_adc((rx_buffer[rx_buffer_pos + 1] << 8 | rx_buffer[rx_buffer_pos + 0]) >> 4) + int8_from_adc(cal_data[6])) * 0.007568
+                    rx_buffer_pos += 2
+                if(ENABLE_EPS2_CURRENT == 1):
+                    eps2_i = (int16_from_adc((rx_buffer[rx_buffer_pos + 1] << 8 | rx_buffer[rx_buffer_pos + 0]) >> 4) + int8_from_adc(cal_data[7])) * 0.0488
+                    rx_buffer_pos += 2
+                
+                pcie1_p = pcie1_v * pcie1_i
+                pcie2_p = pcie2_v * pcie2_i
+                eps1_p = eps1_v * eps1_i
+                eps2_p = eps2_v * eps2_i
+                    
+                value_buffer.append(eps1_i)
 
                 count += 1
-                if(count == 1000):
-                    ksps = round(count/(system_timestamp - time_start)/1000, 3)
-                    count = 0
+                time_elapsed = system_timestamp - time_start
+                if(time_elapsed >= 0.1): # 100ms
                     time_start = system_timestamp
-                    print("KS/s: ", ksps)
+                    print(f'Time: {system_timestamp:.6f} Samples: {count}', f'Min: {min(value_buffer):.3f}A', f'Avg: {sum(value_buffer)/len(value_buffer):.3f}A', f'Max: {max(value_buffer):.3f}A')
+                    value_buffer = []
+                    count = 0
 
 if __name__ == '__main__':
 
@@ -241,7 +337,9 @@ if __name__ == '__main__':
 
     check_connection()
 
-    # max 460800 is reliable here
-    set_baud_rate(460800)
+    #set_baud_rate(115200) # only necessary to increase the sample rate
+
+    read_calibration()
     
-    continuous_data_rx_single(save_to_csv=False)
+    continuous_data_rx(save_to_csv=False)
+
