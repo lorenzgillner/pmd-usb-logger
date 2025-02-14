@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bytemuck = { version = "1.21.0", features = ["derive"] }
 chrono = "0.4.39"
 clap = "4.5.29"
+ctrlc = "3.4.5"
 env_logger = "0.11.6"
 log = "0.4.25"
 serialport = "4.7.0"
