@@ -7,22 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use bytemuck::cast_slice;
 use serialport::SerialPort;
-use crate::pmd::{disable_continuous_tx, AdcArray, PMD_ADC_BYTE_NUM, PMD_ADC_CH_NUM};
+use crate::pmd::read_continuous_tx;
 
-// struct ContinuousReader {
-//     port: Arc<dyn SerialPort>,
-//     buffer_size: usize,
-// }
-
-// impl Iterator for ContinuousReader {
-//     type Item = Vec<u8>;
-//     
-//     fn next(&mut self) -> Option<Self::Item> {
-//         match 
-//     }
-// }
+const BAUDRATE: u32 = 115200;
 
 fn main() {
+    env_logger::init();
+    
     /* Set up command line options */
     let args = Command::new("pmd-usb-logger")
         .arg(
@@ -33,37 +24,10 @@ fn main() {
                 .help("Serial port to use, e.g. /dev/ttyUSB0 or COM0")
                 .default_value("/dev/ttyUSB0"),
         )
-        .arg(
-            Arg::new("baudrate")
-                .short('b')
-                .long("baudrate")
-                .value_name("BAUDRATE")
-                .help("Baud rate to use, e.g. 115200")
-                .default_value("115200"),
-        )
-        .arg(
-            Arg::new("verbose")
-                .short('v')
-                .long("verbose")
-                .help("Enable verbose output")
-                .action(clap::ArgAction::Count),
-        )
         .get_matches();
 
     /* Dispatch command line options */
     let port_name = args.get_one::<String>("port").unwrap();
-    let baudrate: u32 = args
-        .get_one::<String>("baudrate")
-        .unwrap()
-        .parse()
-        .expect("Invalid baud rate");
-    // let log_level = match args.get_count("verbose") {
-    //     0 => "warn",
-    //     1 => "info",
-    //     _ => "debug",
-    // };
-
-    env_logger::init();
 
     /* Check serial port validity */
     let available_ports = serialport::available_ports().unwrap();
@@ -77,13 +41,15 @@ fn main() {
     }
 
     /* Give the user some feedback */
-    println!("Selecting device {} at baud rate {}", port_name, baudrate); // TODO debug!
+    log::debug!("Selecting device {}", port_name);
 
-    /* Initialize serial connection */
-    let mut port = match serialport::new(port_name, baudrate)
+    /* Open serial port connection */
+    let mut port = match serialport::new(port_name, BAUDRATE)
         .timeout(Duration::from_secs(5))
         .data_bits(serialport::DataBits::Eight)
         .stop_bits(serialport::StopBits::One)
+        .parity(serialport::Parity::None)
+        // TODO what about RTS/DTR?
         .open()
     {
         Ok(p) => p,
@@ -91,20 +57,21 @@ fn main() {
     };
 
     /* "Global" calibration storage */
-    let mut calibration: [[i8; 2]; pmd::PMD_ADC_CH_NUM] = [[0, 0]; pmd::PMD_ADC_CH_NUM];
+    // let mut calibration: [i8; pmd::PMD_ADC_CH_NUM] = [0; pmd::PMD_ADC_CH_NUM];
 
     /* Stop previously started continuous TX */
     pmd::disable_continuous_tx(&mut *port);
     
     /* Send welcome message */
     pmd::welcome(&mut *port);
-    
-    /* Check sensors */
+        
+    // /* Check sensors */
     pmd::read_sensors(&mut *port);
 
     /* Read and store device calibration parameters */
-    pmd::read_calibration(&mut *port, &mut calibration);
+    // pmd::read_calibration(&mut *port, &mut calibration);
     
+    /* Set up main loop */
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     
@@ -113,25 +80,34 @@ fn main() {
         r.store(false, Ordering::SeqCst); // Set the running flag to false
     }).expect("Error setting Ctrl-C handler");
     
-    pmd::enable_continuous_tx(&mut *port, pmd::TimestampSize::None);
+    // FYI: this must be an array of u8, because that's what port.read() expects
+    let mut buffer = [0u8; pmd::PMD_ADC_BYTE_NUM];
     
-    let mut buffer = [0u8; PMD_ADC_BYTE_NUM];
+    pmd::enable_continuous_tx(&mut *port);
     
+    // FYI: running.load(...) just reads the boolean value 
     while running.load(Ordering::SeqCst) {
-        match port.read_exact(&mut buffer) {
-            Ok(_) => (),
-            Err(e) => panic!("Error while reading from device: {}", e),
-        }
-    
-        // TODO correctly interpret the returned bytes
-        println!("{:#04X?}", buffer);
+        let adc_buffer = read_continuous_tx(port.as_mut());
+        let adc_buffer = pmd::convert_adc_values(&adc_buffer);
+        
+        // 12 bit LE value inside a 16 bit LE?
+        // adc_buffer[0] = ((buffer[1] as u16) << 8 | (buffer[0] as u16)) >> 4;
+        // adc_buffer[1] = ((buffer[3] as u16) << 8 | (buffer[2] as u16)) >> 4;
+        // adc_buffer[2] = ((buffer[5] as u16) << 8 | (buffer[4] as u16)) >> 4;
+        // adc_buffer[3] = ((buffer[7] as u16) << 8 | (buffer[6] as u16)) >> 4;
+        // adc_buffer[4] = ((buffer[9] as u16) << 8 | (buffer[8] as u16)) >> 4;
+        // adc_buffer[5] = ((buffer[11] as u16) << 8 | (buffer[10] as u16)) >> 4;
+        // adc_buffer[6] = ((buffer[13] as u16) << 8 | (buffer[12] as u16)) >> 4;
+        // adc_buffer[7] = ((buffer[15] as u16) << 8 | (buffer[14] as u16)) >> 4;
+        
+        println!("{:?}", adc_buffer);
     }
     
     pmd::disable_continuous_tx(&mut *port);
     
-    let adc_buffer = pmd::read_adc_buffer(&mut *port);
-    println!("{:?}", adc_buffer);
-
-    let sensor_data = pmd::read_sensor_values(&mut *port);
-    println!("{:?}", sensor_data);
+    // let adc_buffer = pmd::read_adc_buffer(&mut *port);
+    // println!("{:?}", adc_buffer);
+    // 
+    // let sensor_data = pmd::read_sensor_values(&mut *port);
+    // println!("{:?}", sensor_data);
 }
