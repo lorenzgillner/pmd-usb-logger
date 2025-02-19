@@ -1,12 +1,12 @@
-use bytemuck::{cast_slice, from_bytes, Pod, Zeroable};
 use serialport::SerialPort;
 use std::thread;
 use std::time::Duration;
-use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
-use bincode::{deserialize, serialize};
+use bincode::{deserialize, serialize, Options};
 use serde::{Deserialize, Serialize};
 
+
+const DEFAULT_BAUDRATE: u32 = 115200;
 pub const PMD_WELCOME_RESPONSE: &[u8; 17] = b"ElmorLabs PMD-USB";
 pub const PMD_ADC_CH_NUM: usize = 8;
 pub const PMD_ADC_BYTE_NUM: usize = size_of::<u16>() * PMD_ADC_CH_NUM;
@@ -39,23 +39,15 @@ pub enum UartCommand {
     ReadConfig,
     WriteConfig,
     ReadAdcBuffer,
-    WriteContinuousTx,
+    WriteContTx,
     WriteConfigUart,
     ResetDevice = 0xF0,
     EnterBootloader = 0xF1,
     Nop = 0xFF,
 }
 
-#[repr(u8)]
-pub enum TimestampSize {
-    None = 0x00,
-    Small = 0x01,
-    Medium = 0x02,
-    Large = 0x04,
-}
-
 #[repr(C, packed)]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 pub struct DeviceIdStruct {
     pub vendor: u8,
     pub product: u8,
@@ -63,7 +55,7 @@ pub struct DeviceIdStruct {
 }
 
 #[repr(C, packed)]
-#[derive(Copy, Clone, Pod, Zeroable)]
+#[derive(Deserialize, Default)]
 pub struct ReadingStruct {
     pub name: [u8; PMD_SENSOR_NAME_LEN], // because in Rust, a `char` has 4 bytes!
     pub voltage: u16,
@@ -72,32 +64,14 @@ pub struct ReadingStruct {
 }
 
 #[repr(C, packed)]
-#[derive(Copy, Clone, Pod, Zeroable)]
+#[derive(Deserialize, Default)]
 pub struct SensorStruct {
     pub sensor: [ReadingStruct; PMD_SENSOR_NUM],
 }
 
 #[repr(C, packed)]
-#[derive(Copy, Clone, Pod, Zeroable)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct ConfigStruct {
-    pub version: u8,
-    pub crc: u16,
-    pub adc_offset: [i8; PMD_ADC_CH_NUM],
-    pub oled_disable: u8,
-    pub timeout_count: u16,
-    pub timeout_action: u8,
-    pub oled_speed: u8,
-    pub restart_adc_flag: u8,
-    pub cal_flag: u8,
-    pub update_config_flag: u8,
-    pub oled_rotation: u8,
-    pub averaging: u8,
-    pub rsvd: [u8; 3],
-}
-
-#[repr(C, packed)] // aligned
-#[derive(Deserialize, Debug)]
-pub struct ConfigStructV5 {
     pub version: u8,
     _pad1: u8,
     pub crc: u16,
@@ -112,14 +86,12 @@ pub struct ConfigStructV5 {
     pub update_config_flag: u8,
     pub oled_rotation: u8,
     pub averaging: u8,
-    // _pad3: u8,
     pub adc_gain_offset: [i8; PMD_ADC_CH_NUM],
     pub rsvd: [u8; 3],
 }
 
 #[repr(C, packed)]
-// #[derive(Copy, Clone, Pod, Zeroable)]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct ContTxStruct {
     pub enable: u8,
     pub timestamp_bytes: u8,
@@ -127,7 +99,7 @@ pub struct ContTxStruct {
 }
 
 #[repr(C, packed)]
-#[derive(Copy, Clone, Pod, Zeroable)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct UartConfigStruct {
     pub baudrate: u32,
     pub parity: u32,
@@ -135,17 +107,31 @@ pub struct UartConfigStruct {
     pub stop_bits: u32,
 }
 
-pub struct PmdUsbDevice {
-    port: Box<dyn SerialPort>,
+pub struct PMD {
+    pub port: Box<dyn SerialPort>,
     device_id: DeviceIdStruct,
-    config: ContTxStruct,
+    config: ConfigStruct,
     sensors: SensorStruct,
-    calibration: [i8; PMD_ADC_CH_NUM],
-    // tx_buffer: Vec<u8>,
-    // rx_buffer: Vec<u8>,
 }
 
-impl PmdUsbDevice {
+impl PMD {
+    pub fn new(port_name: &str) -> Self {
+        let mut port = serialport::new(port_name, DEFAULT_BAUDRATE)
+            .timeout(Duration::from_secs(5))
+            .data_bits(serialport::DataBits::Eight)
+            .stop_bits(serialport::StopBits::One)
+            .parity(serialport::Parity::None)
+            .open()
+            .expect("Unable to open serial port");
+        
+        PMD {
+            port,
+            device_id: DeviceIdStruct::default(),
+            config: ConfigStruct::default(),
+            sensors: SensorStruct::default(),
+        }
+    }
+    
     fn send_command(&mut self, command: UartCommand) {
         let tx_buffer = command as u8;
         match self.port.write(&[tx_buffer]) {
@@ -178,56 +164,25 @@ impl PmdUsbDevice {
     fn convert_current_sensor_values(&self, value: u16) -> f64 {
         value as f64 * PMD_SENSOR_CURRENT_SCALE
     }
-
-    fn convert_voltage_adc_values(&self, value: u16) -> f64 {
-        value as f64 * PMD_ADC_VOLTAGE_SCALE
+    
+    // XXX if this doesn't work, set AdcArray to [i16; 8]
+    fn int16_from_adc(&self, value: u16) -> i16 {
+        let value = value >> 4;
+        if (value & 0x800) != 0 {
+            value as i16 - 0x1000
+        } else { 
+            value as i16
+        }
     }
 
-    fn convert_current_adc_values(&self, value: u16) -> f64 {
-        value as f64 * PMD_ADC_CURRENT_SCALE
+    fn convert_voltage_adc_values(&self, value: u16, offset: i8) -> f64 {
+        let value = self.int16_from_adc(value);
+        (value + offset as i16) as f64 * PMD_ADC_VOLTAGE_SCALE
     }
 
-    pub fn welcome(&mut self) {
-        self.send_command(UartCommand::Welcome);
-
-        let response = self.read_data(PMD_WELCOME_RESPONSE.len());
-
-        assert_eq!(response, PMD_WELCOME_RESPONSE);
-
-        log::debug!("> {}", std::str::from_utf8(&response).unwrap());
-    }
-
-    pub fn read_id(&mut self) -> DeviceIdStruct {
-        self.send_command(UartCommand::ReadId);
-
-        let rx_buffer = self.read_data(size_of::<DeviceIdStruct>());
-
-        let device_id: DeviceIdStruct = deserialize(&rx_buffer).unwrap();
-
-        assert_eq!(device_id.product, PMD_USB_PRODUCT_ID, "Invalid product ID");
-        assert_eq!(device_id.vendor, PMD_USB_VENDOR_ID, "Invalid vendor ID");
-
-        log::debug!("> Running firmware version {}", device_id.firmware);
-
-        device_id
-    }
-
-    pub fn read_sensors(&mut self) {
-        self.send_command(UartCommand::ReadSensors);
-
-        let buffer = self.read_data(size_of::<SensorStruct>());
-
-        self.sensors = *parse_from_bytes::<SensorStruct>(&buffer);
-    }
-
-    pub fn read_sensor_values(&mut self) -> [u16; PMD_SENSOR_CH_NUM] {
-        self.send_command(UartCommand::ReadSensorValues);
-
-        let rx_buffer = self.read_data(PMD_SENSOR_BYTE_NUM);
-
-        let sensor_values: [u16; PMD_SENSOR_CH_NUM] = cast_slice(&rx_buffer).try_into().unwrap();
-
-        sensor_values
+    fn convert_current_adc_values(&self, value: u16, offset: i8) -> f64 {
+        let value = self.int16_from_adc(value);
+        (value + offset as i16) as f64 * PMD_ADC_CURRENT_SCALE
     }
 
     pub fn convert_sensor_values(&self, sensor_values: [u16; PMD_SENSOR_CH_NUM]) -> Vec<f64> {
@@ -243,47 +198,79 @@ impl PmdUsbDevice {
             }).collect()
     }
 
-    pub fn read_continuous_tx(&mut self) -> AdcBuffer {
-        /* Read a fixed number of bytes */
-        let rx_buffer = self.read_data(PMD_ADC_BYTE_NUM);
-
-        /* Convert received data to u16 */
-        let adc_buffer: AdcBuffer = cast_slice(&rx_buffer).try_into().unwrap();
-
-        /* Apply scaling and return */
-        adc_buffer
-    }
-
     pub fn convert_adc_values(&self, adc_values: &AdcBuffer) -> Vec<f64> {
         adc_values
             .iter()
             .enumerate()
             .map(|(i, &v)| {
                 if i % 2 == 0 {
-                    self.convert_voltage_adc_values(v)
+                    self.convert_voltage_adc_values(v, self.config.adc_offset[i])
                 } else {
-                    self.convert_current_adc_values(v)
+                    self.convert_current_adc_values(v, self.config.adc_offset[i])
                 }
             }).collect()
     }
 
-    pub fn read_adc_buffer(&mut self) -> [u16; PMD_ADC_CH_NUM] {
+    pub fn welcome(&mut self) {
+        self.send_command(UartCommand::Welcome);
+        let response = self.read_data(PMD_WELCOME_RESPONSE.len());
+        assert_eq!(response, PMD_WELCOME_RESPONSE);
+        log::debug!("> {}", std::str::from_utf8(&response).unwrap());
+    }
+
+    pub fn read_device_id(&mut self) -> DeviceIdStruct {
+        self.send_command(UartCommand::ReadId);
+        let rx_buffer = self.read_data(size_of::<DeviceIdStruct>());
+        let device_id: DeviceIdStruct = deserialize(&rx_buffer).unwrap();
+        assert_eq!(device_id.product, PMD_USB_PRODUCT_ID, "Invalid product ID");
+        assert_eq!(device_id.vendor, PMD_USB_VENDOR_ID, "Invalid vendor ID");
+        log::debug!("> Running firmware version {}", device_id.firmware);
+        device_id
+    }
+
+    pub fn read_config(&mut self) -> ConfigStruct {
+        self.send_command(UartCommand::ReadConfig);
+        let rx_buffer = self.read_data(size_of::<ConfigStruct>());
+        let config: ConfigStruct = deserialize(&rx_buffer).unwrap();
+        config
+    }
+
+    pub fn write_config(&mut self) {
+        todo!();
+    }
+
+    pub fn read_sensors(&mut self) -> SensorStruct {
+        self.send_command(UartCommand::ReadSensors);
+        let rx_buffer = self.read_data(size_of::<SensorStruct>());
+        deserialize(&rx_buffer).unwrap()
+    }
+
+    pub fn read_sensor_values(&mut self) -> [u16; PMD_SENSOR_CH_NUM] {
+        self.send_command(UartCommand::ReadSensorValues);
+        let rx_buffer = self.read_data(PMD_SENSOR_BYTE_NUM);
+        deserialize(&rx_buffer).unwrap()
+    }
+
+    pub fn read_adc_buffer(&mut self) -> AdcBuffer {
         self.send_command(UartCommand::ReadAdcBuffer);
-
         let rx_buffer = self.read_data(PMD_ADC_BYTE_NUM);
+        deserialize(&rx_buffer).unwrap()
+    }
 
-        cast_slice(&rx_buffer).try_into().unwrap()
+    pub fn read_cont_tx(&mut self) -> AdcBuffer {
+        let rx_buffer = self.read_data(PMD_ADC_BYTE_NUM);
+        deserialize(&rx_buffer).unwrap()
     }
 
     fn clear_buffer(&mut self) {
         let mut scratch: Vec<u8> = Vec::new();
         let _ = self.port.read_to_end(&mut scratch);
-        log::debug!("Cleared {} bytes: {:?}", scratch.len(), scratch);
+        log::debug!("Cleared {} bytes", scratch.len());
     }
 
-    pub fn write_config_continuous_tx(&mut self, config: &ContTxStruct) {
+    pub fn write_config_cont_tx(&mut self, config: &ContTxStruct) {
         /* Tell the PMD to expect an incoming TX config */
-        self.send_command(UartCommand::WriteContinuousTx);
+        self.send_command(UartCommand::WriteContTx);
 
         /* Serialize the configuration struct back into a byte vector */
         let tx_buffer = serialize(config).unwrap();
@@ -296,59 +283,38 @@ impl PmdUsbDevice {
         thread::sleep(Duration::from_millis(100));
     }
 
-    pub fn enable_continuous_tx(&mut self) {
-        log::debug!("Starting continuous TX");
+    pub fn enable_cont_tx(&mut self) {
+        log::debug!("Starting cont TX");
         let config = ContTxStruct {
             enable: CONFIG_YES,
             timestamp_bytes: CONFIG_TIMESTAMP_NONE,
             adc_channels: CONFIG_MASK_ALL,
         };
-        self.write_config_continuous_tx(&config);
+        self.write_config_cont_tx(&config);
     }
 
-    pub fn disable_continuous_tx(&mut self) {
-        log::debug!("Stopping continuous TX");
+    pub fn disable_cont_tx(&mut self) {
+        log::debug!("Stopping cont TX");
         let config = ContTxStruct {
             enable: CONFIG_NO,
             timestamp_bytes: CONFIG_TIMESTAMP_NONE,
             adc_channels: CONFIG_MASK_NONE,
         };
-        self.write_config_continuous_tx(&config);
+        self.write_config_cont_tx(&config);
         self.clear_buffer();
     }
 
-    pub fn read_config(&mut self) {
-        todo!();
-    }
-
-    pub fn write_config(&mut self) {
-        todo!();
-    }
-
-    pub fn read_calibration(&mut self) {
-        self.send_command(UartCommand::ReadConfig);
-
-        if self.device_id.firmware < 6 {
-            let config = self.read_data(size_of::<ConfigStruct>());
-            let config: ConfigStruct = *parse_from_bytes::<ConfigStruct>(&config);
-            self.calibration[..PMD_ADC_CH_NUM].copy_from_slice(&config.adc_offset[..PMD_ADC_CH_NUM]); // TODO this is redundant
-        } else {
-            let config = self.read_data(size_of::<ConfigStructV5>());
-            let config: ConfigStructV5 = deserialize(&config).unwrap();
-            self.calibration[..PMD_ADC_CH_NUM].copy_from_slice(&config.adc_offset[..PMD_ADC_CH_NUM]); // TODO this is redundant
-            log::debug!("Config: {:?}", config.adc_offset);
-        }
+    pub fn init(&mut self) {
+        self.disable_cont_tx();
+        self.device_id = self.read_device_id();
+        self.config = self.read_config();
+        self.sensors = self.read_sensors();
+        self.welcome();
     }
 }
 
-impl Debug for PmdUsbDevice {
+impl Debug for PMD {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(&self.device_id, f)
     }
-}
-
-// TODO replace this with serde
-pub fn parse_from_bytes<T: Pod>(buffer: &[u8]) -> &T {
-    assert_eq!(buffer.len(), size_of::<T>(), "Buffer size mismatch");
-    from_bytes(buffer)
 }
