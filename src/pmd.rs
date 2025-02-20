@@ -71,10 +71,11 @@ pub struct ReadingStruct {
 
 impl Debug for ReadingStruct {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ReadingStruct \"{}\" [voltage={} V, current={} A]",
-               std::str::from_utf8(&self.name).unwrap(),
+        write!(f, "\"{}\": {{\n\tvoltage: {:.02}V\n\tcurrent: {:.02}A\n\tpower: {}W\n}}",
+               std::str::from_utf8(&self.name).unwrap().trim(),
                self.voltage as f64 * PMD_SENSOR_VOLTAGE_SCALE,
-               self.current as f64 * PMD_SENSOR_CURRENT_SCALE,)
+               self.current as f64 * PMD_SENSOR_CURRENT_SCALE,
+               self.power as f64)
     }
 }
 
@@ -324,10 +325,13 @@ impl PmdUsb {
         };
         let tx_buffer = serialize(&config).unwrap();
         self.send_data(tx_buffer.as_slice());
+        thread::sleep(Duration::from_secs(2));
         match self.port.set_baud_rate(baud_rate) {
             Ok(_) => {},
             Err(e) => panic!("Failed to set baud rate: {}", e),
         }
+        thread::sleep(Duration::from_millis(500));
+        self.clear_buffers();
     }
 
     pub fn bump_baud_rate(&mut self) {
@@ -339,7 +343,9 @@ impl PmdUsb {
     }
 
     pub fn init(&mut self) {
+        self.clear_buffers();
         self.disable_cont_tx();
+        // self.restore_baud_rate();
         self.device_id = self.read_device_id();
         self.config = self.read_config();
         self.sensors = self.read_sensors();

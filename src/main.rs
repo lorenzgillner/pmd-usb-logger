@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::io::{Write, stdout};
 use std::fs::File;
+use std::time::SystemTime;
 use clap::{Arg, Command};
 use csv::Writer;
 
@@ -18,7 +19,7 @@ fn main() {
             Arg::new("port")
                 .short('p')
                 .long("port")
-                .value_name("PORT")
+                .value_name("PATH")
                 .help("Serial port to use, e.g. /dev/ttyUSB0 or COM0")
                 .default_value("/dev/ttyUSB0"),
         )
@@ -26,12 +27,23 @@ fn main() {
             Arg::new("speed")
                 .short('s')
                 .long("speed")
-                .value_name("SPEED_LEVEL")
+                .value_name("LEVEL")
                 .help("Set the polling speed level")
-                .default_value("0"),
+                .default_value("1"),
+        )
+        .arg(
+            Arg::new("timeout")
+                .short('t')
+                .long("timeout")
+                .value_name("MILLISECONDS")
+                .help("If speed is set to 1, set the timeout in milliseconds")
+                .default_value("1000")
+                .requires_if("1", "speed")
         )
         .arg(
             Arg::new("output")
+                .short('o')
+                .long("out")
                 .value_name("FILE")
                 .help("Output file to write to (leave empty to write to STDOUT)")
                 .num_args(0..=1) // At most one argument
@@ -41,6 +53,7 @@ fn main() {
     /* Dispatch command line options */
     let port_name = args.get_one::<String>("port").unwrap();
     let speed_level = args.get_one::<String>("speed").unwrap().parse::<u32>().unwrap();
+    let timeout = args.get_one::<String>("timeout").unwrap().parse::<u64>().unwrap();
     let output_file = args.get_one::<String>("output");
 
     /* Check serial port validity */
@@ -99,7 +112,7 @@ fn main() {
     /* Start the main loop */
     while running.load(Ordering::SeqCst) {
         if speed_level == 1 {
-            std::thread::sleep(std::time::Duration::from_millis(1000));
+            std::thread::sleep(std::time::Duration::from_millis(timeout));
             let _sensor_values = pmd_usb.read_sensor_values();
             sensor_values = pmd_usb.convert_sensor_values(&_sensor_values)
         } else {
@@ -107,7 +120,9 @@ fn main() {
             sensor_values = pmd_usb.convert_adc_values(&adc_buffer);
         }
         let sensor_values_export: Vec<String> = sensor_values.iter().map(|v| v.to_string()).collect();
-        csv_writer.write_record(sensor_values_export).expect("Failed to write CSV");
+        csv_writer.write_field(timestamp().to_string()).expect("Failed to write timestamp");
+        csv_writer.write_record(sensor_values_export).expect("Failed to write data record");
+        csv_writer.flush().expect("Failed to flush CSV");
     }
 
     /* Clean up */
@@ -131,4 +146,8 @@ fn check_port_validity(port_name: &str) {
         println!("Error: Invalid port name \"{}\"", port_name);
         std::process::exit(1);
     }
+}
+
+fn timestamp() -> u128 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos()
 }
