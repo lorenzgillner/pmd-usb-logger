@@ -1,12 +1,14 @@
 use serialport::SerialPort;
 use std::thread;
 use std::time::Duration;
-use std::fmt::{Debug, Formatter};
-use bincode::{deserialize, serialize, Options};
+use std::fmt::Debug;
+use std::io::Write;
+use bincode::{deserialize, serialize};
 use serde::{Deserialize, Serialize};
 
-
 const DEFAULT_BAUDRATE: u32 = 115200;
+const FASTEST_BAUDRATE: u32 = 460800; // can we do 2 Msps?
+
 pub const PMD_WELCOME_RESPONSE: &[u8; 17] = b"ElmorLabs PMD-USB";
 pub const PMD_ADC_CH_NUM: usize = 8;
 pub const PMD_ADC_BYTE_NUM: usize = size_of::<u16>() * PMD_ADC_CH_NUM;
@@ -27,7 +29,11 @@ pub const CONFIG_YES: u8 = 0x01;
 pub const CONFIG_MASK_NONE: u8 = 0x00;
 pub const CONFIG_MASK_ALL: u8 = 0xff;
 pub const CONFIG_TIMESTAMP_NONE: u8 = 0x00;
+pub const CONFIG_UART_PARITY_NONE: u32 = 0x2;
+pub const CONFIG_UART_DATA_WIDTH_EIGHT: u32 = 0x0;
+pub const CONFIG_UART_STOP_BITS_ONE: u32 = 0x0;
 
+pub type SensorBuffer = [u16; PMD_SENSOR_CH_NUM];
 pub type AdcBuffer = [u16; PMD_ADC_CH_NUM];
 
 #[repr(u8)]
@@ -63,6 +69,15 @@ pub struct ReadingStruct {
     pub power: u16,
 }
 
+impl Debug for ReadingStruct {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ReadingStruct \"{}\" [voltage={} V, current={} A]",
+               std::str::from_utf8(&self.name).unwrap(),
+               self.voltage as f64 * PMD_SENSOR_VOLTAGE_SCALE,
+               self.current as f64 * PMD_SENSOR_CURRENT_SCALE,)
+    }
+}
+
 #[repr(C, packed)]
 #[derive(Deserialize, Default)]
 pub struct SensorStruct {
@@ -73,7 +88,7 @@ pub struct SensorStruct {
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct ConfigStruct {
     pub version: u8,
-    _pad1: u8,
+    _pad1: u8, // relevant because of mixed integers
     pub crc: u16,
     pub adc_offset: [i8; PMD_ADC_CH_NUM],
     pub oled_disable: u8,
@@ -101,22 +116,22 @@ pub struct ContTxStruct {
 #[repr(C, packed)]
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct UartConfigStruct {
-    pub baudrate: u32,
+    pub baud_rate: u32,
     pub parity: u32,
     pub data_width: u32,
     pub stop_bits: u32,
 }
 
-pub struct PMD {
-    pub port: Box<dyn SerialPort>,
+pub struct PmdUsb {
+    port: Box<dyn SerialPort>,
     device_id: DeviceIdStruct,
     config: ConfigStruct,
     sensors: SensorStruct,
 }
 
-impl PMD {
+impl PmdUsb {
     pub fn new(port_name: &str) -> Self {
-        let mut port = serialport::new(port_name, DEFAULT_BAUDRATE)
+        let port = serialport::new(port_name, DEFAULT_BAUDRATE)
             .timeout(Duration::from_secs(5))
             .data_bits(serialport::DataBits::Eight)
             .stop_bits(serialport::StopBits::One)
@@ -124,7 +139,7 @@ impl PMD {
             .open()
             .expect("Unable to open serial port");
         
-        PMD {
+        PmdUsb {
             port,
             device_id: DeviceIdStruct::default(),
             config: ConfigStruct::default(),
@@ -133,6 +148,7 @@ impl PMD {
     }
     
     fn send_command(&mut self, command: UartCommand) {
+        self.clear_buffers();
         let tx_buffer = command as u8;
         match self.port.write(&[tx_buffer]) {
             Ok(_) => log::debug!("Sending command {:#04X} to device", tx_buffer),
@@ -142,7 +158,8 @@ impl PMD {
     }
 
     fn send_data(&mut self, data: &[u8]) {
-        match self.port.write(data) {
+        self.clear_buffers();
+        match self.port.write_all(data) {
             Ok(_) => log::debug!("Sending data to device: {:?}", data),
             Err(e) => panic!("Error while writing to device: {}", e),
         }
@@ -164,28 +181,8 @@ impl PMD {
     fn convert_current_sensor_values(&self, value: u16) -> f64 {
         value as f64 * PMD_SENSOR_CURRENT_SCALE
     }
-    
-    // XXX if this doesn't work, set AdcArray to [i16; 8]
-    fn int16_from_adc(&self, value: u16) -> i16 {
-        let value = value >> 4;
-        if (value & 0x800) != 0 {
-            value as i16 - 0x1000
-        } else { 
-            value as i16
-        }
-    }
 
-    fn convert_voltage_adc_values(&self, value: u16, offset: i8) -> f64 {
-        let value = self.int16_from_adc(value);
-        (value + offset as i16) as f64 * PMD_ADC_VOLTAGE_SCALE
-    }
-
-    fn convert_current_adc_values(&self, value: u16, offset: i8) -> f64 {
-        let value = self.int16_from_adc(value);
-        (value + offset as i16) as f64 * PMD_ADC_CURRENT_SCALE
-    }
-
-    pub fn convert_sensor_values(&self, sensor_values: [u16; PMD_SENSOR_CH_NUM]) -> Vec<f64> {
+    pub fn convert_sensor_values(&self, sensor_values: &SensorBuffer) -> Vec<f64> {
         sensor_values
             .iter()
             .enumerate()
@@ -196,6 +193,16 @@ impl PMD {
                     self.convert_current_sensor_values(v)
                 }
             }).collect()
+    }
+
+    fn convert_voltage_adc_values(&self, value: u16, offset: i8) -> f64 {
+        let value = i16_from_adc(value);
+        (value + (offset as i16)) as f64 * PMD_ADC_VOLTAGE_SCALE
+    }
+
+    fn convert_current_adc_values(&self, value: u16, offset: i8) -> f64 {
+        let value = i16_from_adc(value);
+        (value + (offset as i16)) as f64 * PMD_ADC_CURRENT_SCALE
     }
 
     pub fn convert_adc_values(&self, adc_values: &AdcBuffer) -> Vec<f64> {
@@ -245,7 +252,7 @@ impl PMD {
         deserialize(&rx_buffer).unwrap()
     }
 
-    pub fn read_sensor_values(&mut self) -> [u16; PMD_SENSOR_CH_NUM] {
+    pub fn read_sensor_values(&mut self) -> SensorBuffer {
         self.send_command(UartCommand::ReadSensorValues);
         let rx_buffer = self.read_data(PMD_SENSOR_BYTE_NUM);
         deserialize(&rx_buffer).unwrap()
@@ -262,10 +269,11 @@ impl PMD {
         deserialize(&rx_buffer).unwrap()
     }
 
-    fn clear_buffer(&mut self) {
-        let mut scratch: Vec<u8> = Vec::new();
-        let _ = self.port.read_to_end(&mut scratch);
-        log::debug!("Cleared {} bytes", scratch.len());
+    fn clear_buffers(&mut self) {
+        match self.port.clear(serialport::ClearBuffer::All) {
+            Ok(_) => (),
+            Err(e) => panic!("Error while clearing serial port: {}", e),
+        };
     }
 
     pub fn write_config_cont_tx(&mut self, config: &ContTxStruct) {
@@ -284,6 +292,7 @@ impl PMD {
     }
 
     pub fn enable_cont_tx(&mut self) {
+        self.clear_buffers();
         log::debug!("Starting cont TX");
         let config = ContTxStruct {
             enable: CONFIG_YES,
@@ -301,7 +310,32 @@ impl PMD {
             adc_channels: CONFIG_MASK_NONE,
         };
         self.write_config_cont_tx(&config);
-        self.clear_buffer();
+        self.clear_buffers();
+    }
+
+    fn set_baud_rate(&mut self, baud_rate: u32) {
+        log::debug!("Setting baud rate to {}", baud_rate);
+        self.send_command(UartCommand::WriteConfigUart);
+        let config = UartConfigStruct {
+            baud_rate,
+            parity: CONFIG_UART_PARITY_NONE,
+            data_width: CONFIG_UART_DATA_WIDTH_EIGHT,
+            stop_bits: CONFIG_UART_STOP_BITS_ONE,
+        };
+        let tx_buffer = serialize(&config).unwrap();
+        self.send_data(tx_buffer.as_slice());
+        match self.port.set_baud_rate(baud_rate) {
+            Ok(_) => {},
+            Err(e) => panic!("Failed to set baud rate: {}", e),
+        }
+    }
+
+    pub fn bump_baud_rate(&mut self) {
+        self.set_baud_rate(FASTEST_BAUDRATE);
+    }
+
+    pub fn restore_baud_rate(&mut self) {
+        self.set_baud_rate(DEFAULT_BAUDRATE);
     }
 
     pub fn init(&mut self) {
@@ -313,8 +347,15 @@ impl PMD {
     }
 }
 
-impl Debug for PMD {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&self.device_id, f)
+/// Little helper to convert signed 12-bit integers from the ADC to i16
+fn i16_from_adc(value: u16) -> i16 {
+    let value = value >> 4;
+
+    let value = value & 0x0FFF;
+
+    if (value & 0x0800) != 0 {
+        (value | 0xF000) as i16
+    } else {
+        value as i16
     }
 }
