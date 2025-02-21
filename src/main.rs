@@ -29,7 +29,7 @@ fn main() {
                 .long("speed")
                 .value_name("LEVEL")
                 .help("Set the polling speed level")
-                .default_value("1"),
+                .default_value("0"),
         )
         .arg(
             Arg::new("timeout")
@@ -85,22 +85,6 @@ fn main() {
     /* Set up device */
     pmd_usb.init();
 
-    /* Print the CSV header */
-    csv_writer
-        .write_record([
-            "timestamp",
-            "PCIE1_V",
-            "PCIE1_I",
-            "PCIE2_V",
-            "PCIE2_I",
-            "EPS1_V",
-            "EPS1_I",
-            "EPS2_V",
-            "EPS2_I",
-        ])
-        .expect("Failed to write header");
-    csv_writer.flush().expect("Failed to flush");
-
     /* Prepare main loop depending on speed level */
     match speed_level {
         0 => {
@@ -130,6 +114,21 @@ fn main() {
         r.store(false, Ordering::SeqCst); // Set the running flag to false
     })
     .expect("Error setting Ctrl-C handler");
+
+    /* Print the CSV header */
+    csv_writer
+        .write_record([
+            "timestamp",
+            "PCIE1_V",
+            "PCIE1_I",
+            "PCIE2_V",
+            "PCIE2_I",
+            "EPS1_V",
+            "EPS1_I",
+            "EPS2_V",
+            "EPS2_I",
+        ])
+        .expect("Failed to write header");
 
     /* Allocate vector for sensor values */
     let mut sensor_values: Vec<f64>;
