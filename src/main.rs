@@ -1,12 +1,12 @@
 mod pmd;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::io::{Write, stdout};
-use std::fs::File;
-use std::time::SystemTime;
 use clap::{Arg, Command};
 use csv::Writer;
+use std::fs::File;
+use std::io::{stdout, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use crate::pmd::PmdUsb;
 
@@ -38,7 +38,7 @@ fn main() {
                 .value_name("MILLISECONDS")
                 .help("If speed is set to 1, set the timeout in milliseconds")
                 .default_value("1000")
-                .requires_if("1", "speed")
+                .requires_if("1", "speed"),
         )
         .arg(
             Arg::new("output")
@@ -46,14 +46,22 @@ fn main() {
                 .long("out")
                 .value_name("FILE")
                 .help("Output file to write to (leave empty to write to STDOUT)")
-                .num_args(0..=1) // At most one argument
+                .num_args(0..=1), // At most one argument
         )
         .get_matches();
 
     /* Dispatch command line options */
     let port_name = args.get_one::<String>("port").unwrap();
-    let speed_level = args.get_one::<String>("speed").unwrap().parse::<u32>().unwrap();
-    let timeout = args.get_one::<String>("timeout").unwrap().parse::<u64>().unwrap();
+    let speed_level = args
+        .get_one::<String>("speed")
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    let timeout = args
+        .get_one::<String>("timeout")
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
     let output_file = args.get_one::<String>("output");
 
     /* Check serial port validity */
@@ -67,7 +75,7 @@ fn main() {
         Some(filename) => Box::new(File::create(filename).expect("Failed to create file")),
         None => Box::new(stdout()),
     };
-    
+
     /* Create a CSV writer from the boxed writer */
     let mut csv_writer = Writer::from_writer(writer);
 
@@ -77,23 +85,39 @@ fn main() {
     /* Set up device */
     pmd_usb.init();
 
+    /* Print the CSV header */
+    csv_writer
+        .write_record([
+            "timestamp",
+            "PCIE1_V",
+            "PCIE1_I",
+            "PCIE2_V",
+            "PCIE2_I",
+            "EPS1_V",
+            "EPS1_I",
+            "EPS2_V",
+            "EPS2_I",
+        ])
+        .expect("Failed to write header");
+    csv_writer.flush().expect("Failed to flush");
+
     /* Prepare main loop depending on speed level */
     match speed_level {
         0 => {
             let sensors = pmd_usb.read_sensors();
             println!("{:?}", sensors.sensor);
-            return
-        },
+            return;
+        }
         2 => pmd_usb.enable_cont_tx(),
         3 => {
             pmd_usb.bump_baud_rate();
             pmd_usb.enable_cont_tx();
-        },
+        }
         _ if speed_level > 3 => {
             println!("Error: speed level should be between 0 and 3");
             std::process::exit(1);
-        },
-        _ => {},
+        }
+        _ => {}
     }
 
     /* Set up main loop */
@@ -104,7 +128,8 @@ fn main() {
     ctrlc::set_handler(move || {
         log::debug!("Ctrl-C pressed, stopping...");
         r.store(false, Ordering::SeqCst); // Set the running flag to false
-    }).expect("Error setting Ctrl-C handler");
+    })
+    .expect("Error setting Ctrl-C handler");
 
     /* Allocate vector for sensor values */
     let mut sensor_values: Vec<f64>;
@@ -119,9 +144,14 @@ fn main() {
             let adc_buffer = pmd_usb.read_cont_tx();
             sensor_values = pmd_usb.convert_adc_values(&adc_buffer);
         }
-        let sensor_values_export: Vec<String> = sensor_values.iter().map(|v| v.to_string()).collect();
-        csv_writer.write_field(timestamp().to_string()).expect("Failed to write timestamp");
-        csv_writer.write_record(sensor_values_export).expect("Failed to write data record");
+        let sensor_values_export: Vec<String> =
+            sensor_values.iter().map(|v| v.to_string()).collect();
+        csv_writer
+            .write_field(timestamp().to_string())
+            .expect("Failed to write timestamp");
+        csv_writer
+            .write_record(sensor_values_export)
+            .expect("Failed to write data record");
         csv_writer.flush().expect("Failed to flush CSV");
     }
 
@@ -131,8 +161,8 @@ fn main() {
         3 => {
             pmd_usb.disable_cont_tx();
             pmd_usb.restore_baud_rate();
-        },
-        _ => {},
+        }
+        _ => {}
     }
 }
 
@@ -149,5 +179,8 @@ fn check_port_validity(port_name: &str) {
 }
 
 fn timestamp() -> u128 {
-    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos()
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
 }

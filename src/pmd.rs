@@ -1,10 +1,10 @@
-use serialport::SerialPort;
-use std::thread;
-use std::time::Duration;
-use std::fmt::Debug;
-use std::io::Write;
 use bincode::{deserialize, serialize};
 use serde::{Deserialize, Serialize};
+use serialport::SerialPort;
+use std::fmt::Debug;
+use std::io::Write;
+use std::thread;
+use std::time::Duration;
 
 const DEFAULT_BAUDRATE: u32 = 115200;
 const FASTEST_BAUDRATE: u32 = 460800; // can we do 2 Msps?
@@ -71,11 +71,14 @@ pub struct ReadingStruct {
 
 impl Debug for ReadingStruct {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "\"{}\": {{\n\tvoltage: {:.02}V\n\tcurrent: {:.02}A\n\tpower: {}W\n}}",
-               std::str::from_utf8(&self.name).unwrap().trim(),
-               self.voltage as f64 * PMD_SENSOR_VOLTAGE_SCALE,
-               self.current as f64 * PMD_SENSOR_CURRENT_SCALE,
-               self.power as f64)
+        write!(
+            f,
+            "\"{}\": {{\n\tvoltage: {:.02}V\n\tcurrent: {:.02}A\n\tpower: {}W\n}}",
+            std::str::from_utf8(&self.name).unwrap().trim(),
+            self.voltage as f64 * PMD_SENSOR_VOLTAGE_SCALE,
+            self.current as f64 * PMD_SENSOR_CURRENT_SCALE,
+            self.power as f64
+        )
     }
 }
 
@@ -139,7 +142,7 @@ impl PmdUsb {
             .parity(serialport::Parity::None)
             .open()
             .expect("Unable to open serial port");
-        
+
         PmdUsb {
             port,
             device_id: DeviceIdStruct::default(),
@@ -147,7 +150,7 @@ impl PmdUsb {
             sensors: SensorStruct::default(),
         }
     }
-    
+
     fn send_command(&mut self, command: UartCommand) {
         self.clear_buffers();
         let tx_buffer = command as u8;
@@ -193,7 +196,8 @@ impl PmdUsb {
                 } else {
                     self.convert_current_sensor_values(v)
                 }
-            }).collect()
+            })
+            .collect()
     }
 
     fn convert_voltage_adc_values(&self, value: u16, offset: i8) -> f64 {
@@ -216,7 +220,8 @@ impl PmdUsb {
                 } else {
                     self.convert_current_adc_values(v, self.config.adc_offset[i])
                 }
-            }).collect()
+            })
+            .collect()
     }
 
     pub fn welcome(&mut self) {
@@ -327,7 +332,7 @@ impl PmdUsb {
         self.send_data(tx_buffer.as_slice());
         thread::sleep(Duration::from_secs(2));
         match self.port.set_baud_rate(baud_rate) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) => panic!("Failed to set baud rate: {}", e),
         }
         thread::sleep(Duration::from_millis(500));
