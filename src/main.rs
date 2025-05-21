@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crate::pmd::PmdUsb;
+use crate::pmd::{adjust_device_timestamp, PmdUsb};
 
 fn main() {
     env_logger::init();
@@ -132,21 +132,25 @@ fn main() {
 
     /* Allocate vector for sensor values */
     let mut sensor_values: Vec<f64>;
+    let mut timestamp: u128;
 
     /* Start the main loop */
     while running.load(Ordering::SeqCst) {
         if speed_level == 1 {
             std::thread::sleep(std::time::Duration::from_millis(timeout));
             let _sensor_values = pmd_usb.read_sensor_values();
-            sensor_values = pmd_usb.convert_sensor_values(&_sensor_values)
+            timestamp = get_host_timestamp();
+            sensor_values = pmd_usb.convert_sensor_values(&_sensor_values);
         } else {
-            let adc_buffer = pmd_usb.read_cont_tx();
+            let timed_adc_buffer = pmd_usb.read_cont_tx();
+            let adc_buffer = timed_adc_buffer.buffer;
+            timestamp = adjust_device_timestamp(timed_adc_buffer.timestamp);
             sensor_values = pmd_usb.convert_adc_values(&adc_buffer);
         }
         let sensor_values_export: Vec<String> =
             sensor_values.iter().map(|v| v.to_string()).collect();
         csv_writer
-            .write_field(timestamp().to_string())
+            .write_field(timestamp.to_string())
             .expect("Failed to write timestamp");
         csv_writer
             .write_record(sensor_values_export)
@@ -177,7 +181,7 @@ fn check_port_validity(port_name: &str) {
     }
 }
 
-fn timestamp() -> u128 {
+fn get_host_timestamp() -> u128 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()

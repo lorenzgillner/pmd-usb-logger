@@ -6,8 +6,8 @@ use std::io::Write;
 use std::thread;
 use std::time::Duration;
 
-const DEFAULT_BAUDRATE: u32 = 115200;
-const FASTEST_BAUDRATE: u32 = 460800; // can we do 2 Msps?
+const BAUDRATE_DEFAULT: u32 = 115200;
+const BAUDRATE_FASTEST: u32 = 460800; // can we do 2 Msps?
 
 pub const PMD_WELCOME_RESPONSE: &[u8; 17] = b"ElmorLabs PMD-USB";
 pub const PMD_ADC_CH_NUM: usize = 8;
@@ -23,12 +23,17 @@ const PMD_ADC_VOLTAGE_SCALE: f64 = 0.007568;
 const PMD_ADC_CURRENT_SCALE: f64 = 0.0488;
 const PMD_SENSOR_VOLTAGE_SCALE: f64 = 1.0 / 100.0;
 const PMD_SENSOR_CURRENT_SCALE: f64 = 1.0 / 10.0;
+const PMD_CLOCK_MULTIPLIER: f64 = 1e3 / 3_f64; /// scale the 3 MHz clock to nanoseconds
+const PMD_TIMEOUT_SECS: u64 = 3;
 
 pub const CONFIG_NO: u8 = 0x00;
 pub const CONFIG_YES: u8 = 0x01;
 pub const CONFIG_MASK_NONE: u8 = 0x00;
 pub const CONFIG_MASK_ALL: u8 = 0xff;
 pub const CONFIG_TIMESTAMP_NONE: u8 = 0x00;
+pub const CONFIG_TIMESTAMP_LOW: u8 = 0x01;
+pub const CONFIG_TIMESTAMP_MED: u8 = 0x02;
+pub const CONFIG_TIMESTAMP_HIGH: u8 = 0x04;
 pub const CONFIG_UART_PARITY_NONE: u32 = 0x2;
 pub const CONFIG_UART_DATA_WIDTH_EIGHT: u32 = 0x0;
 pub const CONFIG_UART_STOP_BITS_ONE: u32 = 0x0;
@@ -50,6 +55,13 @@ pub enum UartCommand {
     ResetDevice = 0xF0,
     EnterBootloader = 0xF1,
     Nop = 0xFF,
+}
+
+#[repr(C, packed)]
+#[derive(Deserialize, Debug, Default)]
+pub struct TimedAdcBuffer {
+    pub timestamp: u32,
+    pub buffer: AdcBuffer,
 }
 
 #[repr(C, packed)]
@@ -135,7 +147,7 @@ pub struct PmdUsb {
 
 impl PmdUsb {
     pub fn new(port_name: &str) -> Self {
-        let port = serialport::new(port_name, DEFAULT_BAUDRATE)
+        let port = serialport::new(port_name, BAUDRATE_DEFAULT)
             .timeout(Duration::from_secs(5))
             .data_bits(serialport::DataBits::Eight)
             .stop_bits(serialport::StopBits::One)
@@ -270,8 +282,9 @@ impl PmdUsb {
         deserialize(&rx_buffer).unwrap()
     }
 
-    pub fn read_cont_tx(&mut self) -> AdcBuffer {
-        let rx_buffer = self.read_data(PMD_ADC_BYTE_NUM);
+    pub fn read_cont_tx(&mut self) -> TimedAdcBuffer {
+        let n_bytes = size_of::<TimedAdcBuffer>();
+        let rx_buffer = self.read_data(n_bytes);
         deserialize(&rx_buffer).unwrap()
     }
 
@@ -302,7 +315,7 @@ impl PmdUsb {
         log::debug!("Starting cont TX");
         let config = ContTxStruct {
             enable: CONFIG_YES,
-            timestamp_bytes: CONFIG_TIMESTAMP_NONE,
+            timestamp_bytes: CONFIG_TIMESTAMP_HIGH,
             adc_channels: CONFIG_MASK_ALL,
         };
         self.write_config_cont_tx(&config);
@@ -330,7 +343,7 @@ impl PmdUsb {
         };
         let tx_buffer = serialize(&config).unwrap();
         self.send_data(tx_buffer.as_slice());
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(Duration::from_secs(PMD_TIMEOUT_SECS));
         match self.port.set_baud_rate(baud_rate) {
             Ok(_) => {}
             Err(e) => panic!("Failed to set baud rate: {}", e),
@@ -340,11 +353,11 @@ impl PmdUsb {
     }
 
     pub fn bump_baud_rate(&mut self) {
-        self.set_baud_rate(FASTEST_BAUDRATE);
+        self.set_baud_rate(BAUDRATE_FASTEST);
     }
 
     pub fn restore_baud_rate(&mut self) {
-        self.set_baud_rate(DEFAULT_BAUDRATE);
+        self.set_baud_rate(BAUDRATE_DEFAULT);
     }
 
     pub fn init(&mut self) {
@@ -356,6 +369,11 @@ impl PmdUsb {
         self.sensors = self.read_sensors();
         self.welcome();
     }
+}
+
+pub fn adjust_device_timestamp(timestamp: u32) -> u128 {
+    let timestamp_f = timestamp as f64;
+    (timestamp_f * PMD_CLOCK_MULTIPLIER).floor() as u128
 }
 
 /// Little helper to convert signed 12-bit integers from the ADC to i16
