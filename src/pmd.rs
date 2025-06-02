@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 const BAUDRATE_DEFAULT: u32 = 115200;
-const BAUDRATE_FASTEST: u32 = 460800; // can we do 2 Msps?
+const BAUDRATE_FASTEST: u32 = 460800; // TODO can we do 2 Msps?
 
 pub const PMD_WELCOME_RESPONSE: &[u8; 17] = b"ElmorLabs PMD-USB";
 pub const PMD_ADC_CH_NUM: usize = 8;
@@ -23,17 +23,17 @@ const PMD_ADC_VOLTAGE_SCALE: f64 = 0.007568;
 const PMD_ADC_CURRENT_SCALE: f64 = 0.0488;
 const PMD_SENSOR_VOLTAGE_SCALE: f64 = 1.0 / 100.0;
 const PMD_SENSOR_CURRENT_SCALE: f64 = 1.0 / 10.0;
-const PMD_CLOCK_MULTIPLIER: f64 = 1e3 / 3_f64; /// scale the 3 MHz clock to nanoseconds
-const PMD_TIMEOUT_SECS: u64 = 3;
+const PMD_CLOCK_MULTIPLIER: f64 = 1.0/3.0;
+const PMD_TIMEOUT_SECS: u64 = 1;
 
 pub const CONFIG_NO: u8 = 0x00;
 pub const CONFIG_YES: u8 = 0x01;
 pub const CONFIG_MASK_NONE: u8 = 0x00;
 pub const CONFIG_MASK_ALL: u8 = 0xff;
 pub const CONFIG_TIMESTAMP_NONE: u8 = 0x00;
-pub const CONFIG_TIMESTAMP_LOW: u8 = 0x01;
-pub const CONFIG_TIMESTAMP_MED: u8 = 0x02;
-pub const CONFIG_TIMESTAMP_HIGH: u8 = 0x04;
+// pub const CONFIG_TIMESTAMP_LOW: u8 = 0x01;
+// pub const CONFIG_TIMESTAMP_MED: u8 = 0x02;
+pub const CONFIG_TIMESTAMP_FULL: u8 = 0x04;
 pub const CONFIG_UART_PARITY_NONE: u32 = 0x2;
 pub const CONFIG_UART_DATA_WIDTH_EIGHT: u32 = 0x0;
 pub const CONFIG_UART_STOP_BITS_ONE: u32 = 0x0;
@@ -315,7 +315,7 @@ impl PmdUsb {
         log::debug!("Starting cont TX");
         let config = ContTxStruct {
             enable: CONFIG_YES,
-            timestamp_bytes: CONFIG_TIMESTAMP_HIGH,
+            timestamp_bytes: CONFIG_TIMESTAMP_FULL,
             adc_channels: CONFIG_MASK_ALL,
         };
         self.write_config_cont_tx(&config);
@@ -336,7 +336,7 @@ impl PmdUsb {
         log::debug!("Setting baud rate to {}", baud_rate);
         self.send_command(UartCommand::WriteConfigUart);
         let config = UartConfigStruct {
-            baud_rate,
+            baud_rate: baud_rate,
             parity: CONFIG_UART_PARITY_NONE,
             data_width: CONFIG_UART_DATA_WIDTH_EIGHT,
             stop_bits: CONFIG_UART_STOP_BITS_ONE,
@@ -363,7 +363,6 @@ impl PmdUsb {
     pub fn init(&mut self) {
         self.clear_buffers();
         self.disable_cont_tx();
-        // self.restore_baud_rate();
         self.device_id = self.read_device_id();
         self.config = self.read_config();
         self.sensors = self.read_sensors();
@@ -371,6 +370,7 @@ impl PmdUsb {
     }
 }
 
+/// Scale the device-side timestamp (approx. 3 MHz) to micros
 pub fn adjust_device_timestamp(timestamp: u32) -> u128 {
     let timestamp_f = timestamp as f64;
     (timestamp_f * PMD_CLOCK_MULTIPLIER).floor() as u128

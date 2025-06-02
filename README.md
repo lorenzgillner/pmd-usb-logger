@@ -9,3 +9,9 @@ Based on:
 * https://github.com/ElmorLabs/PMDLogger
 * https://github.com/bjorntas/elmorlabs-pmd-usb-serial-interface
 * https://github.com/ElmorLabs/pmd-usb-serial-interface-fast
+
+## Build
+
+```
+cargo build
+```

@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{stdout, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::pmd::{adjust_device_timestamp, PmdUsb};
 
@@ -28,7 +28,7 @@ fn main() {
                 .short('s')
                 .long("speed")
                 .value_name("LEVEL")
-                .help("Set the polling speed level")
+                .help("Set the polling speed level (0 ... 3)")
                 .default_value("0"),
         )
         .arg(
@@ -48,6 +48,15 @@ fn main() {
                 .help("Output file to write to (leave empty to write to STDOUT)")
                 .num_args(0..=1), // At most one argument
         )
+        .arg(
+            Arg::new("until")
+                .short('u')
+                .long("until")
+                .value_name("SECONDS")
+                .help("Stop execution after the specified number of seconds")
+                .default_value("0")
+                .num_args(0..=1)
+        )
         .get_matches();
 
     /* Dispatch command line options */
@@ -63,9 +72,17 @@ fn main() {
         .parse::<u64>()
         .unwrap();
     let output_file = args.get_one::<String>("output");
+    let until = args
+        .get_one::<String>("until")
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
 
     /* Check serial port validity */
-    check_port_validity(port_name);
+    if !check_port_validity(port_name) {
+        println!("Could not open device: Invalid port name \"{}\"", port_name);
+        std::process::exit(1);
+    }
 
     /* Give the user some feedback */
     log::debug!("Selecting device {}", port_name);
@@ -106,12 +123,13 @@ fn main() {
 
     /* Set up main loop */
     let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
+    let rc = running.clone();
+    let ru = running.clone();
 
     /* Set up interrupt handler */
     ctrlc::set_handler(move || {
         log::debug!("Ctrl-C pressed, stopping...");
-        r.store(false, Ordering::SeqCst); // Set the running flag to false
+        rc.store(false, Ordering::SeqCst); // Set the running flag to false
     })
     .expect("Error setting Ctrl-C handler");
 
@@ -134,16 +152,25 @@ fn main() {
     let mut sensor_values: Vec<f64>;
     let mut timestamp: u128;
 
+    /* If required, start the timeout thread */
+    if until > 0 {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(until));
+            ru.store(false, Ordering::SeqCst);
+        });
+    }
+
     /* Start the main loop */
     while running.load(Ordering::SeqCst) {
         if speed_level == 1 {
-            std::thread::sleep(std::time::Duration::from_millis(timeout));
             let _sensor_values = pmd_usb.read_sensor_values();
             timestamp = get_host_timestamp();
             sensor_values = pmd_usb.convert_sensor_values(&_sensor_values);
+            std::thread::sleep(Duration::from_millis(timeout));
         } else {
             let timed_adc_buffer = pmd_usb.read_cont_tx();
             let adc_buffer = timed_adc_buffer.buffer;
+            // timestamp = timed_adc_buffer.timestamp as u128;
             timestamp = adjust_device_timestamp(timed_adc_buffer.timestamp);
             sensor_values = pmd_usb.convert_adc_values(&adc_buffer);
         }
@@ -169,21 +196,18 @@ fn main() {
     }
 }
 
-fn check_port_validity(port_name: &str) {
+fn check_port_validity(port_name: &str) -> bool {
     let available_ports = serialport::available_ports().unwrap();
     let is_valid_port = available_ports
         .iter()
         .any(|port_info| port_info.port_name == port_name);
 
-    if !is_valid_port {
-        println!("Error: Invalid port name \"{}\"", port_name);
-        std::process::exit(1);
-    }
+    is_valid_port
 }
 
 fn get_host_timestamp() -> u128 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
-        .as_nanos()
+        .as_micros()
 }
