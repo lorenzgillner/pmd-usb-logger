@@ -153,12 +153,14 @@ fn main() {
     let mut timestamp: u128;
 
     /* If required, start the timeout thread */
-    if until > 0 {
-        std::thread::spawn(move || {
+    let handle = if until > 0 {
+        Some(std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(until));
             ru.store(false, Ordering::SeqCst);
-        });
-    }
+        }))
+    } else {
+        None
+    };
 
     /* Start the main loop */
     while running.load(Ordering::SeqCst) {
@@ -186,6 +188,10 @@ fn main() {
     }
 
     /* Clean up */
+    if let Some(handle) = handle {
+        handle.join().expect("Failed to join thread");
+    }
+    
     match speed_level {
         2 => pmd_usb.disable_cont_tx(),
         3 => {
