@@ -41,14 +41,6 @@ fn main() {
                 .requires_if("1", "speed"),
         )
         .arg(
-            Arg::new("output")
-                .short('o')
-                .long("out")
-                .value_name("FILE")
-                .help("Output file to write to (leave empty to write to STDOUT)")
-                .num_args(0..=1), // At most one argument
-        )
-        .arg(
             Arg::new("until")
                 .short('u')
                 .long("until")
@@ -56,6 +48,14 @@ fn main() {
                 .help("Stop execution after the specified number of seconds")
                 .default_value("0")
                 .num_args(0..=1)
+        )
+        .arg(
+            Arg::new("output")
+                .short('o')
+                .long("out")
+                .value_name("FILE")
+                .help("Output file to write to (leave empty to write to STDOUT)")
+                .num_args(0..=1), // At most one argument
         )
         .get_matches();
 
@@ -161,11 +161,21 @@ fn main() {
     } else {
         None
     };
+    
+    // TODO switch the device query function based on the speed level here
+    let read_pmd: fn(&PmdUsb) -> Vec<f64>;
+    
+    if speed_level == 1 {
+        read_pmd = read_pmd_slow;
+    } else {
+        read_pmd = read_pmd_fast;
+    }
 
     /* Start the main loop */
     while running.load(Ordering::SeqCst) {
+        read_pmd(&pmd_usb);
         if speed_level == 1 {
-            let _sensor_values = pmd_usb.read_sensor_values();
+            let _sensor_values = pmd_usb.read_sensor_values(); // TODO should we use multithreading here?
             timestamp = get_host_timestamp();
             sensor_values = pmd_usb.convert_sensor_values(&_sensor_values);
             std::thread::sleep(Duration::from_millis(timeout));
@@ -176,6 +186,7 @@ fn main() {
             timestamp = adjust_device_timestamp(timed_adc_buffer.timestamp);
             sensor_values = pmd_usb.convert_adc_values(&adc_buffer);
         }
+        // TODO move this to a different thread because this costs a few millis
         let sensor_values_export: Vec<String> =
             sensor_values.iter().map(|v| v.to_string()).collect();
         csv_writer
@@ -191,7 +202,7 @@ fn main() {
     if let Some(handle) = handle {
         handle.join().expect("Failed to join thread");
     }
-    
+
     match speed_level {
         2 => pmd_usb.disable_cont_tx(),
         3 => {
@@ -216,4 +227,20 @@ fn get_host_timestamp() -> u128 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_micros()
+}
+
+fn read_pmd_slow(pmd_usb: &PmdUsb) -> Vec<f64> {
+    let _sensor_values = pmd_usb.read_sensor_values(); // TODO should we use multithreading here?
+    let timestamp = get_host_timestamp();
+    let sensor_values = pmd_usb.convert_sensor_values(&_sensor_values);
+    std::thread::sleep(Duration::from_millis(timeout));
+    sensor_values
+}
+
+fn read_pmd_fast(pmd_usb: &PmdUsb) -> Vec<f64> {
+    let timed_adc_buffer = pmd_usb.read_cont_tx();
+    let adc_buffer = timed_adc_buffer.buffer;
+    let timestamp = adjust_device_timestamp(timed_adc_buffer.timestamp);
+    let sensor_values = pmd_usb.convert_adc_values(&adc_buffer);
+    sensor_values
 }
