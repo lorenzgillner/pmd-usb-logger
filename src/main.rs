@@ -71,6 +71,7 @@ fn main() {
         .unwrap()
         .parse::<u64>()
         .unwrap();
+    let timeouts = Duration::from_millis(timeout);
     let output_file = args.get_one::<String>("output");
     let until = args
         .get_one::<String>("until")
@@ -87,15 +88,6 @@ fn main() {
     /* Give the user some feedback */
     log::debug!("Selecting device {}", port_name);
 
-    /* Choose either an output file or STDOUT */
-    let writer: Box<dyn Write> = match output_file {
-        Some(filename) => Box::new(File::create(filename).expect("Failed to create file")),
-        None => Box::new(stdout()),
-    };
-
-    /* Create a CSV writer from the boxed writer */
-    let mut csv_writer = Writer::from_writer(writer);
-
     /* Connect to the PMD */
     let mut pmd_usb = PmdUsb::new(port_name);
 
@@ -104,16 +96,19 @@ fn main() {
 
     /* Prepare main loop depending on speed level */
     match speed_level {
+        /* At this speed level, we simply print once and exit */
         0 => {
             let sensors = pmd_usb.read_sensors();
             println!("{:?}", sensors.sensor);
             return;
         }
+        /* Prepare for continuous TX */
         2 => pmd_usb.enable_cont_tx(),
         3 => {
             pmd_usb.bump_baud_rate();
             pmd_usb.enable_cont_tx();
         }
+        /* Speed level out of range */
         _ if speed_level > 3 => {
             println!("Error: speed level should be between 0 and 3");
             std::process::exit(1);
@@ -133,6 +128,15 @@ fn main() {
     })
     .expect("Error setting Ctrl-C handler");
 
+    /* Choose either an output file or STDOUT */
+    let writer: Box<dyn Write> = match output_file {
+        Some(filename) => Box::new(File::create(filename).expect("Failed to create file")),
+        None => Box::new(stdout()),
+    };
+
+    /* Create a CSV writer from the boxed writer */
+    let mut csv_writer = Writer::from_writer(writer);
+
     /* Print the CSV header */
     csv_writer
         .write_record([
@@ -148,10 +152,6 @@ fn main() {
         ])
         .expect("Failed to write header");
 
-    /* Allocate vector for sensor values */
-    let mut sensor_values: Vec<f64>;
-    let mut timestamp: u128;
-
     /* If required, start the timeout thread */
     let handle = if until > 0 {
         Some(std::thread::spawn(move || {
@@ -162,30 +162,23 @@ fn main() {
         None
     };
     
-    // TODO switch the device query function based on the speed level here
-    let read_pmd: fn(&PmdUsb) -> Vec<f64>;
-    
+    /* Switch polling method based on speed level */
+    let read_pmd: fn(&mut PmdUsb) -> (u128, Vec<f64>);
     if speed_level == 1 {
         read_pmd = read_pmd_slow;
     } else {
         read_pmd = read_pmd_fast;
     }
 
+    /* Allocate vector for sensor values */
+    let mut sensor_values: Vec<f64>;
+    let mut timestamp: u128;
+
     /* Start the main loop */
     while running.load(Ordering::SeqCst) {
-        read_pmd(&pmd_usb);
-        if speed_level == 1 {
-            let _sensor_values = pmd_usb.read_sensor_values(); // TODO should we use multithreading here?
-            timestamp = get_host_timestamp();
-            sensor_values = pmd_usb.convert_sensor_values(&_sensor_values);
-            std::thread::sleep(Duration::from_millis(timeout));
-        } else {
-            let timed_adc_buffer = pmd_usb.read_cont_tx();
-            let adc_buffer = timed_adc_buffer.buffer;
-            // timestamp = timed_adc_buffer.timestamp as u128;
-            timestamp = adjust_device_timestamp(timed_adc_buffer.timestamp);
-            sensor_values = pmd_usb.convert_adc_values(&adc_buffer);
-        }
+        /* Read sensor values depending on the current polling method */
+        (timestamp, sensor_values) = read_pmd(&mut pmd_usb);
+        
         // TODO move this to a different thread because this costs a few millis
         let sensor_values_export: Vec<String> =
             sensor_values.iter().map(|v| v.to_string()).collect();
@@ -196,6 +189,8 @@ fn main() {
             .write_record(sensor_values_export)
             .expect("Failed to write data record");
         csv_writer.flush().expect("Failed to flush CSV");
+        
+        std::thread::sleep(timeouts);
     }
 
     /* Clean up */
@@ -213,6 +208,21 @@ fn main() {
     }
 }
 
+fn read_pmd_slow(pmd_usb: &mut PmdUsb) -> (u128, Vec<f64>) {
+    let _sensor_values = pmd_usb.read_sensor_values(); // TODO should we use multithreading here?
+    let timestamp = get_host_timestamp();
+    let sensor_values = pmd_usb.convert_sensor_values(&_sensor_values);
+    (timestamp, sensor_values)
+}
+
+fn read_pmd_fast(pmd_usb: &mut PmdUsb) -> (u128, Vec<f64>) {
+    let timed_adc_buffer = pmd_usb.read_cont_tx();
+    let adc_buffer = timed_adc_buffer.buffer;
+    let timestamp = adjust_device_timestamp(timed_adc_buffer.timestamp);
+    let sensor_values = pmd_usb.convert_adc_values(&adc_buffer);
+    (timestamp, sensor_values)
+}
+
 fn check_port_validity(port_name: &str) -> bool {
     let available_ports = serialport::available_ports().unwrap();
     let is_valid_port = available_ports
@@ -227,20 +237,4 @@ fn get_host_timestamp() -> u128 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_micros()
-}
-
-fn read_pmd_slow(pmd_usb: &PmdUsb) -> Vec<f64> {
-    let _sensor_values = pmd_usb.read_sensor_values(); // TODO should we use multithreading here?
-    let timestamp = get_host_timestamp();
-    let sensor_values = pmd_usb.convert_sensor_values(&_sensor_values);
-    std::thread::sleep(Duration::from_millis(timeout));
-    sensor_values
-}
-
-fn read_pmd_fast(pmd_usb: &PmdUsb) -> Vec<f64> {
-    let timed_adc_buffer = pmd_usb.read_cont_tx();
-    let adc_buffer = timed_adc_buffer.buffer;
-    let timestamp = adjust_device_timestamp(timed_adc_buffer.timestamp);
-    let sensor_values = pmd_usb.convert_adc_values(&adc_buffer);
-    sensor_values
 }
