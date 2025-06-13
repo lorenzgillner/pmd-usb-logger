@@ -164,10 +164,7 @@ fn main() {
     /* Start the main loop */
     while running.load(Ordering::SeqCst) {
         /* Read sensor values depending on the current polling method */
-        let start = std::time::Instant::now();
         (timestamp, sensor_values) = read_pmd(&mut pmd_usb);
-        let elapsed = start.elapsed().as_micros();
-        println!("{:?}", elapsed);
 
         /* Queue datum for logging */
         logging_buffer
