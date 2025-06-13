@@ -1,14 +1,21 @@
 mod pmd;
 
-use crate::pmd::{adjust_device_timestamp, PmdUsb};
+use crate::pmd::{adjust_device_timestamp, PmdUsb, SensorValues};
 use clap::{Arg, Command};
 use csv::Writer;
-use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{stdout, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{channel, Receiver};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, SystemTime};
+
+struct Config {
+    speed_level: u8,
+    interval: Duration,
+    timeout: Duration,
+}
 
 fn main() {
     env_logger::init();
@@ -36,7 +43,7 @@ fn main() {
                 .short('i')
                 .long("interval")
                 .value_name("MILLISECONDS")
-                .help("If speed is set to 1, set the polling interval")
+                .help("If option speed is set to 1, set the polling interval (min. 5 ms)")
                 .default_value("1000")
                 .requires_if("1", "speed"),
         )
@@ -61,23 +68,27 @@ fn main() {
 
     /* Dispatch command line options */
     let port_name = args.get_one::<String>("port").unwrap();
-    let speed_level = args
-        .get_one::<String>("speed")
-        .unwrap()
-        .parse::<u32>()
-        .unwrap();
-    let interval = Duration::from_millis(
-        args.get_one::<String>("interval")
-            .unwrap()
-            .parse::<u64>()
-            .unwrap(),
-    );
-    let timeout = args
-        .get_one::<String>("timeout")
-        .unwrap()
-        .parse::<u64>()
-        .unwrap();
     let output = args.get_one::<String>("output").cloned();
+
+    let config = Config {
+        speed_level: args
+            .get_one::<String>("speed")
+            .unwrap()
+            .parse::<u8>()
+            .unwrap(),
+        interval: Duration::from_millis(
+            args.get_one::<String>("interval")
+                .unwrap()
+                .parse::<u64>()
+                .unwrap(),
+        ),
+        timeout: Duration::from_secs(
+            args.get_one::<String>("timeout")
+                .unwrap()
+                .parse::<u64>()
+                .unwrap(),
+        ),
+    };
 
     /* Check serial port validity */
     if !check_port_validity(port_name) {
@@ -95,7 +106,7 @@ fn main() {
     pmd_usb.init();
 
     /* Prepare main loop depending on speed level */
-    match speed_level {
+    match config.speed_level {
         /* At this speed level, we simply print once and exit */
         0 => {
             let sensors = pmd_usb.read_sensors();
@@ -109,7 +120,7 @@ fn main() {
             pmd_usb.enable_cont_tx();
         }
         /* Speed level out of range */
-        _ if speed_level > 3 => {
+        _ if config.speed_level > 3 => {
             println!("Error: speed level should be between 0 and 3");
             std::process::exit(1);
         }
@@ -129,32 +140,27 @@ fn main() {
     })
     .expect("Error setting Ctrl-C handler");
 
-    /* Allocate vector for sensor values */
-    let mut sensor_values: Vec<f64>;
+    /* Allocate sensor data */
     let mut timestamp: u128;
+    let mut sensor_values: SensorValues;
 
-    /* Timestamps and sensor values will be stored here */
-    let logging_buffer = Arc::new(Mutex::new(VecDeque::new()));
-    let logging_buffer_w = logging_buffer.clone();
+    let (tx, rx) = channel::<(u128, SensorValues)>();
 
     /* Create a new thread for writing the output file */
-    let writer_handle = std::thread::spawn(move || {
-        log_to_csv(output, logging_buffer_w, running_w);
+    let writer_handle = thread::spawn(move || {
+        log_to_csv(output, rx, running_w);
     });
 
     /* Switch polling method based on speed level */
-    let read_pmd: fn(&mut PmdUsb) -> (u128, Vec<f64>);
-    if speed_level == 1 {
-        read_pmd = read_pmd_slow;
-    } else {
-        read_pmd = read_pmd_fast;
-    }
+    let read_pmd = match config.speed_level {
+        1 => read_pmd_slow,
+        _ => read_pmd_fast,
+    };
 
     /* If required, start the timeout thread */
-    let timeout_handle = if timeout > 0 {
-        Some(std::thread::spawn(move || {
-            // TODO we should add some padding here ... or use tokio::timeout instead!
-            std::thread::sleep(Duration::from_secs(timeout));
+    let timeout_handle = if !config.timeout.is_zero() {
+        Some(thread::spawn(move || {
+            thread::sleep(config.timeout);
             running_t.store(false, Ordering::SeqCst);
         }))
     } else {
@@ -164,25 +170,22 @@ fn main() {
     /* Start the main loop */
     while running.load(Ordering::SeqCst) {
         /* Read sensor values depending on the current polling method */
-        (timestamp, sensor_values) = read_pmd(&mut pmd_usb);
+        (timestamp, sensor_values) = read_pmd(&mut pmd_usb, &config);
 
-        /* Queue datum for logging */
-        logging_buffer
-            .lock()
-            .expect("Unable to acquire lock")
-            .push_back((timestamp, sensor_values));
-
-        std::thread::sleep(interval);
+        /* Send current sensor values to the writer */
+        tx.send((timestamp, sensor_values)).unwrap();
     }
 
-    /* Clean up */
+    /* Join the timeout thread, if possible */
     if let Some(handle) = timeout_handle {
         handle.join().expect("Failed to join timeout thread");
     }
 
+    /* Join the CSV writer */
     writer_handle.join().expect("Failed to join writer thread");
 
-    match speed_level {
+    /* Reset the device */
+    match config.speed_level {
         2 => pmd_usb.disable_cont_tx(),
         3 => {
             pmd_usb.disable_cont_tx();
@@ -192,14 +195,22 @@ fn main() {
     }
 }
 
-fn read_pmd_slow(pmd_usb: &mut PmdUsb) -> (u128, Vec<f64>) {
+fn read_pmd_slow(pmd_usb: &mut PmdUsb, config: &Config) -> (u128, SensorValues) {
+    let start = std::time::Instant::now();
     let _sensor_values = pmd_usb.read_sensor_values();
-    let timestamp = get_host_timestamp(); // this will always lag behind
+    let elapsed = start.elapsed();
+    println!("{}", elapsed.as_micros());
+    let timestamp = get_host_timestamp();
     let sensor_values = pmd_usb.convert_sensor_values(&_sensor_values);
+    thread::sleep(if config.interval > elapsed {
+        config.interval - elapsed
+    } else {
+        Duration::new(0, 0)
+    });
     (timestamp, sensor_values)
 }
 
-fn read_pmd_fast(pmd_usb: &mut PmdUsb) -> (u128, Vec<f64>) {
+fn read_pmd_fast(pmd_usb: &mut PmdUsb, config: &Config) -> (u128, SensorValues) {
     let timed_adc_buffer = pmd_usb.read_cont_tx();
     let adc_buffer = timed_adc_buffer.buffer;
     let timestamp = adjust_device_timestamp(timed_adc_buffer.timestamp);
@@ -209,12 +220,12 @@ fn read_pmd_fast(pmd_usb: &mut PmdUsb) -> (u128, Vec<f64>) {
 
 fn log_to_csv(
     output: Option<String>,
-    logging_buffer: Arc<Mutex<VecDeque<(u128, Vec<f64>)>>>,
+    rx: Receiver<(u128, SensorValues)>,
     running: Arc<AtomicBool>,
 ) {
     /* Choose either an output file or STDOUT */
     let sink: Box<dyn Write> = match output {
-        Some(path) => Box::new(File::create(path).expect("Failed to create file")),
+        Some(path) => Box::new(File::create(path).expect("Failed to create output file")),
         None => Box::new(stdout()),
     };
 
@@ -237,25 +248,19 @@ fn log_to_csv(
         .expect("Failed to write CSV header");
 
     let mut timestamp: u128;
-    let mut sensor_values: Vec<f64>;
+    let mut sensor_values: SensorValues;
 
     while running.load(Ordering::SeqCst) {
-        if !logging_buffer.lock().unwrap().is_empty() {
-            (timestamp, sensor_values) = logging_buffer
-                .lock()
-                .expect("Failed to access logging buffer")
-                .pop_front()
-                .unwrap();
-            let sensor_values_string: Vec<String> =
-                sensor_values.iter().map(|v| v.to_string()).collect();
-            csv_writer
-                .write_field(timestamp.to_string())
-                .expect("Failed to write timestamp");
-            csv_writer
-                .write_record(sensor_values_string)
-                .expect("Failed to write CSV record");
-            csv_writer.flush().expect("Failed to flush CSV writer");
-        }
+        (timestamp, sensor_values) = rx.recv().unwrap();
+        let sensor_values_string: Vec<String> =
+            sensor_values.iter().map(|v| v.to_string()).collect();
+        csv_writer
+            .write_field(timestamp.to_string())
+            .expect("Failed to write timestamp");
+        csv_writer
+            .write_record(sensor_values_string)
+            .expect("Failed to write CSV record");
+        csv_writer.flush().expect("Failed to flush CSV writer");
     }
 }
 

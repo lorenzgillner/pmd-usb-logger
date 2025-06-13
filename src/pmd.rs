@@ -40,6 +40,7 @@ pub const CONFIG_UART_STOP_BITS_ONE: u32 = 0x0;
 
 pub type SensorBuffer = [u16; PMD_SENSOR_CH_NUM];
 pub type AdcBuffer = [u16; PMD_ADC_CH_NUM];
+pub type SensorValues = [f64; PMD_SENSOR_CH_NUM];
 
 #[repr(u8)]
 pub enum UartCommand {
@@ -198,18 +199,14 @@ impl PmdUsb {
         value as f64 * PMD_SENSOR_CURRENT_SCALE
     }
 
-    pub fn convert_sensor_values(&self, sensor_values: &SensorBuffer) -> Vec<f64> {
-        sensor_values
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| {
-                if i % 2 == 0 {
-                    self.convert_voltage_sensor_values(v)
-                } else {
-                    self.convert_current_sensor_values(v)
-                }
-            })
-            .collect()
+    pub fn convert_sensor_values(&self, sensor_values: &SensorBuffer) -> SensorValues {
+        let mut _sensor_values: SensorValues = Default::default();
+        for i in (0..sensor_values.len()).step_by(2) {
+            let j = i + 1;
+            _sensor_values[i] = self.convert_voltage_sensor_values(sensor_values[i]);
+            _sensor_values[j] = self.convert_current_sensor_values(sensor_values[j])
+        }
+        _sensor_values
     }
 
     fn convert_voltage_adc_values(&self, value: u16, offset: i8) -> f64 {
@@ -222,18 +219,16 @@ impl PmdUsb {
         (value + (offset as i16)) as f64 * PMD_ADC_CURRENT_SCALE
     }
 
-    pub fn convert_adc_values(&self, adc_values: &AdcBuffer) -> Vec<f64> {
-        adc_values
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| {
-                if i % 2 == 0 {
-                    self.convert_voltage_adc_values(v, self.config.adc_offset[i])
-                } else {
-                    self.convert_current_adc_values(v, self.config.adc_offset[i])
-                }
-            })
-            .collect()
+    pub fn convert_adc_values(&self, adc_values: &AdcBuffer) -> SensorValues {
+        let mut _adc_values: SensorValues = Default::default();
+        for i in (0..adc_values.len()).step_by(2) {
+            let j = i + 1;
+            _adc_values[i] =
+                self.convert_voltage_adc_values(adc_values[i], self.config.adc_offset[i]);
+            _adc_values[j] =
+                self.convert_current_adc_values(adc_values[j], self.config.adc_offset[j]);
+        }
+        _adc_values
     }
 
     pub fn welcome(&mut self) {
