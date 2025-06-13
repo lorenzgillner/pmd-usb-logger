@@ -23,7 +23,7 @@ const PMD_ADC_VOLTAGE_SCALE: f64 = 0.007568;
 const PMD_ADC_CURRENT_SCALE: f64 = 0.0488;
 const PMD_SENSOR_VOLTAGE_SCALE: f64 = 1.0 / 100.0;
 const PMD_SENSOR_CURRENT_SCALE: f64 = 1.0 / 10.0;
-const PMD_CLOCK_MULTIPLIER: f64 = 1.0/3.0;
+const PMD_CLOCK_MULTIPLIER: f64 = 1.0 / 3.0;
 const PMD_TIMEOUT_SECS: u64 = 1;
 
 pub const CONFIG_NO: u8 = 0x00;
@@ -336,7 +336,7 @@ impl PmdUsb {
         log::debug!("Setting baud rate to {}", baud_rate);
         self.send_command(UartCommand::WriteConfigUart);
         let config = UartConfigStruct {
-            baud_rate: baud_rate,
+            baud_rate,
             parity: CONFIG_UART_PARITY_NONE,
             data_width: CONFIG_UART_DATA_WIDTH_EIGHT,
             stop_bits: CONFIG_UART_STOP_BITS_ONE,
@@ -370,10 +370,10 @@ impl PmdUsb {
     }
 }
 
-/// Scale the device-side timestamp (approx. 3 MHz) to micros
+/// Scale the device-side timestamp (approx. 3 MHz) to microseconds
 pub fn adjust_device_timestamp(timestamp: u32) -> u128 {
-    let timestamp_f = timestamp as f64;
-    (timestamp_f * PMD_CLOCK_MULTIPLIER).floor() as u128
+    let _timestamp = timestamp as f64;
+    (_timestamp * PMD_CLOCK_MULTIPLIER).floor() as u128
 }
 
 /// Little helper to convert signed 12-bit integers from the ADC to i16
