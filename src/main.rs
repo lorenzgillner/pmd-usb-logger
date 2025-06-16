@@ -173,7 +173,8 @@ fn main() {
         (timestamp, sensor_values) = read_pmd(&mut pmd_usb, &config);
 
         /* Send current sensor values to the writer */
-        tx.send((timestamp, sensor_values)).unwrap();
+        tx.send((timestamp, sensor_values))
+            .expect("Failed to communicate with CSV writer");
     }
 
     /* Join the timeout thread, if possible */
@@ -182,7 +183,9 @@ fn main() {
     }
 
     /* Join the CSV writer */
-    writer_handle.join().expect("Failed to join writer thread");
+    writer_handle
+        .join()
+        .expect("Failed to join CSV writer thread");
 
     /* Reset the device */
     match config.speed_level {
@@ -199,7 +202,6 @@ fn read_pmd_slow(pmd_usb: &mut PmdUsb, config: &Config) -> (u128, SensorValues) 
     let start = std::time::Instant::now();
     let _sensor_values = pmd_usb.read_sensor_values();
     let elapsed = start.elapsed();
-    println!("{}", elapsed.as_micros());
     let timestamp = get_host_timestamp();
     let sensor_values = pmd_usb.convert_sensor_values(&_sensor_values);
     thread::sleep(if config.interval > elapsed {
