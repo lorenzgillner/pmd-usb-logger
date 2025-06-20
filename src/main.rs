@@ -27,7 +27,7 @@ fn main() {
                 .short('p')
                 .long("port")
                 .value_name("PATH")
-                .help("Serial port to use, e.g. /dev/ttyUSB0 or COM0")
+                .help("Serial port to use, e.g. /dev/ttyUSB0 or COM1")
                 .default_value("/dev/ttyUSB0"),
         )
         .arg(
@@ -136,7 +136,7 @@ fn main() {
     /* Set up interrupt handler */
     ctrlc::set_handler(move || {
         log::debug!("Ctrl-C pressed, stopping...");
-        running_c.store(false, Ordering::SeqCst); // Set the running flag to false
+        running_c.store(false, Ordering::SeqCst);
     })
     .expect("Error setting Ctrl-C handler");
 
@@ -212,7 +212,7 @@ fn read_pmd_slow(pmd_usb: &mut PmdUsb, config: &Config) -> (u128, SensorValues) 
     (timestamp, sensor_values)
 }
 
-fn read_pmd_fast(pmd_usb: &mut PmdUsb, config: &Config) -> (u128, SensorValues) {
+fn read_pmd_fast(pmd_usb: &mut PmdUsb, _config: &Config) -> (u128, SensorValues) {
     let timed_adc_buffer = pmd_usb.read_cont_tx();
     let adc_buffer = timed_adc_buffer.buffer;
     let timestamp = adjust_device_timestamp(timed_adc_buffer.timestamp);

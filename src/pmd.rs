@@ -6,8 +6,8 @@ use std::io::Write;
 use std::thread;
 use std::time::Duration;
 
-const BAUDRATE_DEFAULT: u32 = 115200;
-const BAUDRATE_FASTEST: u32 = 460800; // TODO can we do 2 Msps?
+const BAUDRATE_DEFAULT: u32 = 115_200;
+const BAUDRATE_FASTEST: u32 = 460_800; //345_600;//230_400;
 
 pub const PMD_WELCOME_RESPONSE: &[u8; 17] = b"ElmorLabs PMD-USB";
 pub const PMD_ADC_CH_NUM: usize = 8;
@@ -149,10 +149,11 @@ pub struct PmdUsb {
 impl PmdUsb {
     pub fn new(port_name: &str) -> Self {
         let port = serialport::new(port_name, BAUDRATE_DEFAULT)
-            .timeout(Duration::from_secs(5))
+            .timeout(Duration::from_millis(100))
             .data_bits(serialport::DataBits::Eight)
             .stop_bits(serialport::StopBits::One)
             .parity(serialport::Parity::None)
+            // .flow_control(serialport::FlowControl::Hardware)
             .open()
             .expect("Unable to open serial port");
 
@@ -239,6 +240,7 @@ impl PmdUsb {
     }
 
     pub fn read_device_id(&mut self) -> DeviceIdStruct {
+        self.clear_buffers();
         self.send_command(UartCommand::ReadId);
         let rx_buffer = self.read_data(size_of::<DeviceIdStruct>());
         let device_id: DeviceIdStruct = deserialize(&rx_buffer).unwrap();
@@ -320,8 +322,8 @@ impl PmdUsb {
         log::debug!("Stopping cont TX");
         let config = ContTxStruct {
             enable: CONFIG_NO,
-            timestamp_bytes: CONFIG_TIMESTAMP_NONE,
-            adc_channels: CONFIG_MASK_NONE,
+            timestamp_bytes: CONFIG_TIMESTAMP_FULL, //CONFIG_TIMESTAMP_NONE,
+            adc_channels: CONFIG_MASK_ALL,          //CONFIG_MASK_NONE,
         };
         self.write_config_cont_tx(&config);
         self.clear_buffers();
@@ -356,8 +358,8 @@ impl PmdUsb {
     }
 
     pub fn init(&mut self) {
-        self.clear_buffers();
         self.disable_cont_tx();
+        self.clear_buffers();
         self.device_id = self.read_device_id();
         self.config = self.read_config();
         self.sensors = self.read_sensors();
